@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#11161c">
+  <title>Factorium — конструктор блупринтов</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <svg class="symbol-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-fit" viewBox="0 0 24 24"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4M8 8h8v8H8z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M15 8V4H4v11h4"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 4 12 8-12 8z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="m13 2-9 12h7l-1 8 10-13h-8z"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+  </svg>
+
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="Factorium — главная"><span class="brand-mark">F<span></span></span><span>Factorium<span class="brand-sub">PRODUCTION WORKBENCH</span></span></a>
+    <nav class="header-context" aria-label="Текущий режим"><span class="context-active">Конструктор</span><span class="prototype-tag">ПРОТОТИП 01</span></nav>
+    <div class="header-right"><span id="game-badge" class="environment"><span class="status-dot"></span><span>Загружаем каталог</span></span><button id="help-button" class="icon-button" aria-label="Как пользоваться Factorium"><svg><use href="#i-info"/></svg></button></div>
+  </header>
+
+  <main>
+    <section class="page-heading"><div><p class="eyebrow">ОТ РЕЦЕПТА ДО РАБОТАЮЩЕЙ ФАБРИКИ</p><h1>Конструктор блупринтов<span class="heading-dot">.</span></h1><p class="page-subtitle">Задайте выпуск. Проверьте схему. Постройте в Factorio.</p></div><div class="heading-note"><span class="mini-line"></span><span>1 ингредиент <span class="text-muted">→</span> 1 продукт<br><small>Электрические линии · Nauvis</small></span></div></section>
+    <div id="connection-error" class="error-banner" role="alert" hidden><span id="connection-error-text"></span><button id="retry-button" class="button secondary">Повторить</button></div>
+
+    <div class="workbench">
+      <aside class="config-panel panel" aria-labelledby="config-title">
+        <div class="panel-heading"><h2 id="config-title">Параметры производства</h2><span class="step-number">01</span></div>
+        <form id="factory-form">
+          <fieldset id="config-fields" disabled>
+            <div class="form-section"><label for="recipe-select" class="field-label">Продукт на выходе <span id="recipe-count" class="subtle-count"></span></label>
+              <div class="recipe-select-wrap"><img id="product-icon" class="product-icon" alt="" src="/api/icons/iron-gear-wheel"><select id="recipe-select" name="recipe" required aria-describedby="recipe-id"><option>Загрузка рецептов…</option></select></div>
+              <p id="recipe-id" class="code-caption">—</p>
+              <label for="rate" class="field-label rate-label">Производительность</label><div class="rate-input"><input id="rate" name="rate" type="number" value="5" min="0.001" max="1000000" step="any" required inputmode="decimal"><span>предм./с</span></div>
+              <div class="rate-presets" role="group" aria-label="Быстрый выбор производительности"><button type="button" data-rate="1">1/с</button><button type="button" data-rate="5">5/с</button><button type="button" data-rate="15">15/с</button><button type="button" data-rate="30">30/с</button></div>
+            </div>
+            <div class="form-section equipment-section"><div class="section-label"><span>ОБОРУДОВАНИЕ</span><span class="quiet-tag">Обычное качество</span></div>
+              <label for="machine" class="field-label">Производство</label><div class="equipment-field"><img id="machine-icon" alt=""><select id="machine" name="machine" required></select></div><p id="machine-detail" class="field-hint">—</p>
+              <label for="belt" class="field-label">Конвейер</label><div class="equipment-field"><img id="belt-icon" alt=""><select id="belt" name="belt" required></select></div><p id="belt-detail" class="field-hint">—</p>
+              <label for="inserter" class="field-label">Манипулятор</label><div class="equipment-field"><img id="inserter-icon" alt=""><select id="inserter" name="inserter" required></select></div><p class="field-hint">Размер руки: 1 · без бонусов исследований</p>
+              <label for="pole" class="field-label">Электроснабжение</label><div class="equipment-field"><img id="pole-icon" alt=""><select id="pole" name="pole" required></select></div><p id="pole-detail" class="field-hint">—</p>
+            </div>
+            <div class="config-footer"><div class="recipe-flow"><img id="input-icon" alt=""><span id="input-label">Сырьё</span><svg><use href="#i-arrow"/></svg><span id="output-label">Продукт</span></div><p>Электричество подводится извне. Столбы и провода входят в чертёж.</p><button id="generate-button" type="submit" class="button primary full-width"><svg><use href="#i-grid"/></svg><span>Построить чертёж</span></button></div>
+          </fieldset>
+        </form>
+        <p id="generation-error" class="inline-error" role="alert" hidden></p>
+      </aside>
+
+      <section class="workspace" aria-label="Результат генерации">
+        <div class="result-heading"><div class="result-title"><h2 id="result-title">Новая производственная линия</h2><span id="snapshot-badge" class="badge neutral">Ожидание</span></div><div class="result-actions"><button id="copy-button" class="button secondary" disabled><svg><use href="#i-copy"/></svg><span>Копировать</span></button><button id="export-button" class="button primary" disabled><svg><use href="#i-download"/></svg><span>Экспорт</span></button></div></div>
+        <div id="dirty-notice" class="dirty-notice" role="status" hidden>Параметры изменены. Постройте новый чертёж, чтобы проверить и экспортировать его.</div>
+
+        <div class="metrics" aria-live="polite" aria-atomic="true">
+          <div class="metric"><span class="metric-label">Выпуск</span><strong id="metric-output">—<small> предм./с</small></strong><span id="metric-output-note" class="metric-note">Целевой выпуск</span></div>
+          <div class="metric"><span class="metric-label">Машины</span><strong id="metric-machines">—</strong><span id="metric-machines-note" class="metric-note">Количество и ряды</span></div>
+          <div class="metric"><span class="metric-label">Подача сырья</span><strong id="metric-input">—<small> предм./с</small></strong><span class="metric-note">С запасом 5% к расчёту</span></div>
+          <div class="metric"><span class="metric-label">Электроснабжение</span><strong id="metric-power">—</strong><span id="metric-power-note" class="metric-note">Установленная нагрузка</span></div>
+        </div>
+
+        <section class="canvas-panel panel" aria-labelledby="canvas-title">
+          <div class="canvas-toolbar"><div><svg class="small-icon"><use href="#i-grid"/></svg><h3 id="canvas-title">Раскладка</h3><span id="entity-count" class="code-caption">— сущностей</span></div><div class="layer-controls"><label><input id="show-power" type="checkbox" checked><span>Зоны питания</span></label><label><input id="show-wires" type="checkbox" checked><span>Провода</span></label><label><input id="show-ports" type="checkbox" checked><span>Порты</span></label></div></div>
+          <div id="viewport" class="viewport" tabindex="0" role="region" aria-label="Интерактивная схема. Стрелки — перемещение, плюс и минус — масштаб, 0 — вписать целиком.">
+            <svg id="factory-canvas" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Схема производственной линии" viewBox="0 0 60 25"><defs><pattern id="grid" width="1" height="1" patternUnits="userSpaceOnUse"><path d="M 1 0 L 0 0 0 1" fill="none" stroke="#2a3440" stroke-width="0.025"/></pattern></defs><g id="scene"></g></svg>
+            <div id="canvas-empty" class="canvas-empty"><span class="empty-illustration"><svg><use href="#i-grid"/></svg></span><strong>Готовим рабочее пространство</strong><span>Читаем рецепты из игрового каталога</span></div>
+            <div id="canvas-busy" class="canvas-busy" hidden><span class="spinner"></span>Рассчитываем линию и электросеть…</div>
+            <div id="entity-inspector" class="entity-inspector" hidden><div><span id="inspector-kind"></span><button id="close-inspector" class="icon-button" aria-label="Закрыть информацию о сущности"><svg><use href="#i-close"/></svg></button></div><strong id="inspector-name"></strong><span id="inspector-detail" class="code-caption"></span></div>
+            <div class="canvas-legend" aria-label="Обозначения"><span><i class="legend-machine"></i>Машины</span><span><i class="legend-belt"></i>Ленты</span><span><i class="legend-inserter"></i>Манипуляторы</span><span><i class="legend-pole"></i>Столбы</span></div>
+            <div class="zoom-controls"><button id="zoom-out" class="icon-button" aria-label="Уменьшить масштаб"><svg><use href="#i-minus"/></svg></button><output id="zoom-level" aria-label="Масштаб">100%</output><button id="zoom-in" class="icon-button" aria-label="Увеличить масштаб"><svg><use href="#i-plus"/></svg></button><span></span><button id="zoom-fit" class="icon-button" aria-label="Вписать схему целиком"><svg><use href="#i-fit"/></svg></button></div>
+          </div>
+          <div class="canvas-footnote"><span id="canvas-caption">Схема появится после генерации</span><span class="canvas-instruction">Колесо — масштаб · перетаскивание — перемещение</span></div>
+        </section>
+
+        <section class="details-panel panel"><div class="tabs" role="tablist" aria-label="Подробности чертежа"><button id="ports-tab" class="tab" role="tab" aria-selected="true" aria-controls="ports-panel" tabindex="0">Подключения<span id="ports-count" class="tab-count">0</span></button><button id="verification-tab" class="tab" role="tab" aria-selected="false" aria-controls="verification-panel" tabindex="-1">Проверка в Factorio<span id="verification-dot" class="tab-status-dot"></span></button></div>
+          <div id="ports-panel" role="tabpanel" aria-labelledby="ports-tab"><div id="ports-empty" class="detail-empty">Здесь будут точки подачи сырья, выхода продукта и подключения питания.</div><div id="ports-content" hidden><div class="ports-summary"><div><span class="section-label">ПОТОК МАТЕРИАЛОВ</span><p><strong id="ports-input-name"></strong><svg><use href="#i-arrow"/></svg><strong id="ports-output-name"></strong></p></div><div class="flow-note"><span id="theoretical-input"></span><small>Теоретическая потребность без запаса</small></div></div><div class="table-scroll"><table><thead><tr><th scope="col">Подключение</th><th scope="col">Предмет / назначение</th><th scope="col">Подача</th><th scope="col">Координаты</th></tr></thead><tbody id="ports-body"></tbody></table></div></div></div>
+          <div id="verification-panel" role="tabpanel" aria-labelledby="verification-tab" hidden><div class="verification-header"><div><h3 id="verification-title">Проверьте выпуск в игре</h3><p id="verification-description">Factorio построит чертёж и измерит реальный выпуск при заданной подаче.</p></div><button id="verify-button" class="button primary" disabled><svg><use href="#i-play"/></svg><span>Проверить в Factorio</span></button></div><div id="verification-running" class="verification-running" role="status" hidden><span class="spinner"></span><div><strong>Испытание выполняется</strong><span>Импорт чертежа, прогрев и четыре окна измерения.</span></div><output id="verification-elapsed">0 с</output></div><div id="verification-results" class="verification-results" hidden><div class="verification-numbers"><div><span class="metric-label">Измеренный выпуск</span><strong id="measured-rate">—</strong><span id="measured-target" class="field-hint"></span></div><div><span class="metric-label">Электросети</span><strong id="network-count">—</strong><span id="powered-count" class="field-hint"></span></div><div><span class="metric-label">Доставлено</span><strong id="delivered-count">—</strong><span id="measurement-note" class="field-hint"></span></div></div><div class="measurement-chart"><span class="section-label">ВЫПУСК ПО ОКНАМ ИЗМЕРЕНИЙ</span><svg id="rate-chart" viewBox="0 0 500 110" role="img" aria-label="Измеренный выпуск в четырёх временных окнах"></svg></div></div><div id="verification-errors" class="inline-error" role="alert" hidden></div><details class="simulation-settings"><summary>Длительность испытания <span id="simulation-summary">120 с + 120 с</span></summary><div><label for="warmup">Прогрев, игровые секунды<input id="warmup" type="number" value="120" min="0" max="30000" step="1"></label><label for="measure">Измерение, игровые секунды<input id="measure" type="number" value="120" min="4" max="30000" step="1"></label></div><p>Для медленных рецептов увеличьте время. Проверяется пустая фабрика без бонусов исследований.</p></details></div>
+        </section>
+        <div id="history" class="history" hidden><span>В этой сессии</span><div id="history-items"></div></div>
+      </section>
+    </div>
+    <footer class="app-footer"><span>Factorium <span class="text-muted">/</span> Blueprint lab</span><span>Локальный генератор · нормальное качество · без жидкостей</span></footer>
+  </main>
+
+  <dialog id="export-dialog" aria-labelledby="export-title"><div class="dialog-heading"><div><p class="eyebrow">ГОТОВО К СТРОИТЕЛЬСТВУ</p><h2 id="export-title">Экспорт блупринта</h2></div><button class="icon-button" data-close-dialog aria-label="Закрыть экспорт"><svg><use href="#i-close"/></svg></button></div><p id="export-description" class="dialog-description"></p><label for="blueprint-string" class="field-label">Строка для импорта в Factorio</label><textarea id="blueprint-string" readonly spellcheck="false" rows="5" aria-describedby="import-instruction"></textarea><p id="import-instruction" class="field-hint">В игре откройте «Импорт строки» и вставьте блупринт.</p><button id="dialog-copy-button" class="button primary full-width"><svg><use href="#i-copy"/></svg><span>Копировать строку</span></button><div class="download-grid"><a id="download-txt" class="download-option"><svg><use href="#i-download"/></svg><span>Строка блупринта<small>.txt · для импорта в игру</small></span></a><a id="download-json" class="download-option"><svg><use href="#i-download"/></svg><span>Блупринт JSON<small>.json · сущности и провода</small></span></a><a id="download-svg" class="download-option"><svg><use href="#i-download"/></svg><span>Схема производства<small>.svg · с зонами питания</small></span></a><a id="download-factory" class="download-option"><svg><use href="#i-download"/></svg><span>Проект Factorium<small>.json · параметры и расчёты</small></span></a><a id="download-report" class="download-option" hidden><svg><use href="#i-download"/></svg><span>Отчёт испытания<small>.json · измерения из игры</small></span></a></div></dialog>
+  <dialog id="help-dialog" aria-labelledby="help-title"><div class="dialog-heading"><h2 id="help-title">От рецепта до блупринта</h2><button class="icon-button" data-close-dialog aria-label="Закрыть справку"><svg><use href="#i-close"/></svg></button></div><ol class="help-steps"><li><strong>Выберите продукт и выпуск.</strong><p>Доступны поддерживаемые рецепты с одним твёрдым ингредиентом и одним продуктом. Машины подбираются по совместимости.</p></li><li><strong>Постройте чертёж.</strong><p>На схеме можно приблизить отдельную машину, посмотреть порты и включить зоны питания столбов. Большой выпуск делится на несколько рядов.</p></li><li><strong>Проверьте в Factorio.</strong><p>Игра измерит выпуск после прогрева. Статическая проверка схемы сама по себе не подтверждает производительность.</p></li><li><strong>Экспортируйте и подключите.</strong><p>Подведите сырьё к каждому входу, продолжите выходные ленты и подключите электричество к отмеченному столбу. Подача включает запас 5%.</p></li></ol><p class="help-footnote">История хранится до остановки сервера. Скачайте проект, чтобы сохранить его. Каталог обновляется командой <code>factorium extract</code>; затем перезапустите сервер.</p></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

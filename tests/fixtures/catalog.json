@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "game_version": "2.1.24",
+  "mods": {"base": "2.1.24", "fixture": "1.0.0"},
+  "recipes": {
+    "test-recipe": {
+      "name": "test-recipe", "type": "recipe", "hidden": true,
+      "categories": ["chemistry"], "energy": 2.5, "enabled": false,
+      "ingredients": [{"type": "fluid", "name": "water", "amount": 10, "minimum_temperature": 25}],
+      "products": [{"type": "item", "name": "test-item", "amount_min": 1, "amount_max": 3, "independent_probability": 0.25, "shared_probability": {"min": 0, "max": 1}, "ignored_by_productivity": 1}],
+      "surface_conditions": [{"property": "pressure", "min": 1000}]
+    }
+  },
+  "items": {
+    "test-item": {"name": "test-item", "type": "item-with-tags", "hidden": false, "stack_size": 50, "place_result": "test-machine"}
+  },
+  "entities": {
+    "test-machine": {
+      "name": "test-machine", "type": "assembling-machine", "hidden": false,
+      "tile_width": 5, "tile_height": 7,
+      "collision_box": {"left_top": {"x": -1.2, "y": -1.2}, "right_bottom": {"x": 1.2, "y": 1.2}},
+      "selection_box": {"left_top": {"x": -2.5, "y": -3.5}, "right_bottom": {"x": 2.5, "y": 3.5}},
+      "crafting_categories": [], "fluid_boxes": {},
+      "quality_stats": {"normal": {"crafting_speed": 0.5}, "legendary": {"crafting_speed": 1.25}},
+      "unknown_modded_property": {"preserve": true}
+    }
+  },
+  "fluids": {"water": {"name": "water", "type": "fluid", "hidden": false, "default_temperature": 15}},
+  "technologies": [], "tiles": {}, "qualities": {},
+  "space_locations": [], "surfaces": {}, "surface_properties": []
+}

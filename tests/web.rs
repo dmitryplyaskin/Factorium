@@ -1,0 +1,270 @@
+mod common;
+
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
+use factorium::{
+    FactoryRequest,
+    web::{WebOptions, application},
+};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+fn app() -> Router {
+    application(
+        common::catalog(),
+        WebOptions {
+            port: 3410,
+            game: None,
+        },
+    )
+}
+fn request(method: &str, path: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "127.0.0.1:3410")
+        .header("origin", "http://127.0.0.1:3410")
+        .header("x-factorium-request", "1")
+        .header("content-type", "application/json")
+        .body(if method == "GET" {
+            Body::empty()
+        } else {
+            Body::from(body.to_string())
+        })
+        .unwrap()
+}
+async fn json_body(response: axum::response::Response) -> Value {
+    serde_json::from_slice(&to_bytes(response.into_body(), 10_000_000).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn catalogs_only_compatible_recipes_and_generates_exportable_snapshots() {
+    let app = app();
+    let response = app
+        .clone()
+        .oneshot(request("GET", "/api/catalog", json!(null)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let catalog = json_body(response).await;
+    assert_eq!(catalog["verification_available"], false);
+    assert!(
+        catalog["recipes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "iron-gear-wheel")
+    );
+    assert_eq!(
+        catalog["recipes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "iron-plate")
+            .unwrap()["machines"],
+        json!(["electric-furnace"])
+    );
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/artifacts",
+            serde_json::to_value(FactoryRequest::new("iron-gear-wheel", 5.0)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let artifact = json_body(response).await;
+    let id = artifact["id"].as_str().unwrap();
+    assert_eq!(artifact["factory"]["input_per_second"], 10.0);
+    assert_eq!(artifact["verification"]["status"], "not_started");
+    for format in ["txt", "json", "factory", "svg"] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/artifacts/{id}/export/{format}"),
+                Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()["content-disposition"]
+                .to_str()
+                .unwrap()
+                .contains("attachment;")
+        );
+        let bytes = to_bytes(response.into_body(), 10_000_000).await.unwrap();
+        assert!(!bytes.is_empty());
+        if format == "txt" {
+            assert_eq!(bytes[0], b'0');
+        }
+        if format == "json" {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap(),
+                artifact["factory"]["document"]
+            );
+        }
+    }
+    let missing_report = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/artifacts/{id}/export/report"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_report.status(), StatusCode::CONFLICT);
+    let verify = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/artifacts/{id}/verification"),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(verify.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let history = json_body(
+        app.oneshot(request("GET", "/api/artifacts", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(history["artifacts"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn validation_errors_are_json_and_do_not_create_successful_artifacts() {
+    let app = app();
+    let mut bad = FactoryRequest::new("iron-gear-wheel", 5.0);
+    bad.rate = -1.0;
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/artifacts",
+            serde_json::to_value(bad).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(json_body(response).await["error"]["detail"].is_string());
+    let response = app
+        .clone()
+        .oneshot(request("POST", "/api/artifacts", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(request("GET", "/api/artifacts/999", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let history = json_body(
+        app.oneshot(request("GET", "/api/artifacts", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(history["artifacts"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn artifact_ids_cannot_refer_to_another_server_session() {
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let response = app()
+            .oneshot(request(
+                "POST",
+                "/api/artifacts",
+                serde_json::to_value(FactoryRequest::new("iron-gear-wheel", 5.0)).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let artifact = json_body(response).await;
+        ids.push(artifact["id"].as_str().unwrap().to_owned());
+    }
+    assert_ne!(ids[0], ids[1]);
+}
+
+#[tokio::test]
+async fn forbids_foreign_origins_and_dns_rebinding_hosts() {
+    for (header, value) in [
+        ("host", "foreign.example:3410"),
+        ("origin", "https://foreign.example"),
+        ("x-factorium-request", "0"),
+    ] {
+        let mut req = request(
+            "POST",
+            "/api/artifacts",
+            serde_json::to_value(FactoryRequest::new("iron-gear-wheel", 5.0)).unwrap(),
+        );
+        req.headers_mut().insert(header, value.parse().unwrap());
+        let response = app().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let response = app()
+        .oneshot(request("GET", "/", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().contains_key("content-security-policy"));
+}
+
+#[tokio::test]
+async fn retains_independent_snapshots_and_bounds_the_session_history() {
+    let app = app();
+    let mut ids = Vec::new();
+    for rate in 1..=22 {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/artifacts",
+                serde_json::to_value(FactoryRequest::new("iron-gear-wheel", f64::from(rate)))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        ids.push(json_body(response).await["id"].as_str().unwrap().to_owned());
+    }
+    let response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/artifacts/{}", ids[0]),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let snapshot = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/artifacts/{}", ids[20]),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(snapshot["factory"]["request"]["rate"], 21.0);
+    assert_eq!(snapshot["verification"]["status"], "not_started");
+    let history = json_body(
+        app.oneshot(request("GET", "/api/artifacts", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(history["artifacts"].as_array().unwrap().len(), 20);
+}

@@ -1,0 +1,29 @@
+[package]
+name = "factorium"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Factorio blueprint generation tools and game prototype extractor"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+flate2 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+wait-timeout = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "signal", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

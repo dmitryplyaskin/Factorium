@@ -1,0 +1,8 @@
+{
+  "name": "factorium-fixture",
+  "version": "1.0.0",
+  "title": "Factorium extraction test fixture",
+  "author": "Factorium",
+  "factorio_version": "2.1",
+  "dependencies": ["base >= 2.1.24"]
+}
