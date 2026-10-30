@@ -163,7 +163,12 @@ fn build_catalog(data: &GameData, game_available: bool) -> Value {
     let recipes:Vec<_>=data.recipes.values().filter_map(|r| {
         let compatible:Vec<_>=machines.iter().filter(|m|supported_recipe(data,r,m).is_ok()).map(|m|m.prototype.name.clone()).collect();
         if compatible.is_empty() {return None;}
-        Some(json!({"name":r.prototype.name,"product":r.products[0].name,"input":r.ingredients[0].name,"input_amount":r.ingredients[0].amount,"ingredients":r.ingredients.iter().map(|a|json!({"item":a.name,"amount":a.amount})).collect::<Vec<_>>(),"output_amount":r.products[0].amount.or(r.products[0].amount_min),"seconds":r.energy,"machines":compatible}))
+        let item = data.items.get(&r.products[0].name);
+        let property = |key: &str| r.prototype.properties.get(key)
+            .or_else(|| item.and_then(|i| i.prototype.properties.get(key)));
+        Some(json!({"name":r.prototype.name,"product":r.products[0].name,
+            "group":property("group"),"subgroup":property("subgroup"),"order":property("order"),
+            "input":r.ingredients[0].name,"input_amount":r.ingredients[0].amount,"ingredients":r.ingredients.iter().map(|a|json!({"item":a.name,"amount":a.amount})).collect::<Vec<_>>(),"output_amount":r.products[0].amount.or(r.products[0].amount_min),"seconds":r.energy,"machines":compatible}))
     }).collect();
     let equipment = |kind: &str| {
         data.entities

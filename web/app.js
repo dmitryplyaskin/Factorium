@@ -1,9 +1,94 @@
-import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputRequirements, recipeIngredients } from './model.js';
+import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputRequirements, recipeIngredients, itemGroups, groupInfo, subgroupLabel, recipeGroup, recipeTitle, filterRecipes } from './model.js';
 
 const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
 const state = { catalog:null, artifact:null, generating:false, poll:null, clock:null, history:[], view:null, fitted:null, drag:null, selected:null, stringCache:new Map() };
 let toastTimer;
+let activePanel=null, panelTrigger=null, recipeFilter='all', interfaceHidden=false;
+
+function closePanel(restoreFocus=true) {
+  if(!activePanel)return;
+  const panel=$(activePanel),focused=panel.contains(document.activeElement);
+  panel.hidden=true;activePanel=null;
+  delete document.body.dataset.panel;
+  for(const button of document.querySelectorAll('[data-panel]'))button.setAttribute('aria-expanded','false');
+  if(restoreFocus && focused)panelTrigger?.focus({preventScroll:true});
+}
+function openPanel(id,trigger) {
+  if(interfaceHidden)toggleInterface();
+  if(activePanel===id){closePanel();return;}
+  closePanel(false);activePanel=id;panelTrigger=trigger || document.querySelector(`[data-panel="${id}"]`);
+  $('entity-inspector').hidden=true;
+  $(id).hidden=false;panelTrigger?.setAttribute('aria-expanded','true');
+  $(id).scrollTop=0;
+  document.body.dataset.panel=id;
+  $(id).querySelector('button,input,select')?.focus({preventScroll:true});
+}
+function toggleInterface() {
+  interfaceHidden=!interfaceHidden;
+  if(interfaceHidden){closePanel(false);$('entity-inspector').hidden=true;}
+  document.body.classList.toggle('interface-hidden',interfaceHidden);
+  $('toggle-interface').setAttribute('aria-pressed',String(interfaceHidden));
+  $('toggle-interface').setAttribute('aria-label',interfaceHidden?'Показать интерфейс':'Скрыть интерфейс');
+  $('toggle-interface').title=`${interfaceHidden?'Показать':'Скрыть'} интерфейс · H`;
+  if(interfaceHidden)$('viewport').focus({preventScroll:true});
+}
+function openRecipePicker() {
+  if(!state.catalog || state.generating)return;
+  if(activePanel!=='config-panel')openPanel('config-panel');
+  recipeFilter='all';$('recipe-search').value='';renderRecipePicker();
+  $('recipe-dialog').showModal();$('recipe-search').focus();
+}
+function renderRecipePicker() {
+  if(!state.catalog)return;
+  const recipes=state.catalog.recipes,query=$('recipe-search').value;
+  const groups=[...new Set(recipes.map(recipeGroup))].sort((a,b)=>{
+    const order=Object.keys(itemGroups),ai=order.indexOf(a),bi=order.indexOf(b);
+    return (ai<0?order.length:ai)-(bi<0?order.length:bi) || a.localeCompare(b);
+  });
+  const filters=$('recipe-groups'),focusedGroup=document.activeElement?.dataset.group;
+  filters.replaceChildren();
+  for(const group of ['all',...groups]) {
+    const info=group==='all'?{label:'Все',icon:null}:groupInfo(group);
+    const button=element('button','recipe-group');button.type='button';button.dataset.group=group;
+    button.setAttribute('aria-pressed',String(recipeFilter===group));
+    if(info.icon){const img=element('img');img.src=iconURL(info.icon);img.alt='';button.append(img);}
+    else button.append(svg('svg',{viewBox:'0 0 24 24'},undefined));
+    if(!info.icon)button.firstChild.append(svg('use',{href:'#i-grid'}));
+    button.append(element('span','',info.label),element('small','',String(filterRecipes(recipes,query,group).length)));
+    button.addEventListener('click',()=>{recipeFilter=group;renderRecipePicker();});filters.append(button);
+  }
+  if(focusedGroup)filters.querySelector(`[data-group="${CSS.escape(focusedGroup)}"]`)?.focus();
+  const matches=filterRecipes(recipes,query,recipeFilter),results=$('recipe-results');results.replaceChildren();
+  text('recipe-group-title',recipeFilter==='all'?'Все предметы':groupInfo(recipeFilter).label);
+  text('recipe-results-count',`${matches.length} из ${recipes.length}`);
+  $('recipe-search-empty').hidden=matches.length>0;results.hidden=!matches.length;
+  const grouped=new Map();
+  for(const recipe of matches){const group=recipeGroup(recipe),subgroup=recipe.subgroup || 'Прочее';
+    if(!grouped.has(group))grouped.set(group,new Map());
+    const rows=grouped.get(group);if(!rows.has(subgroup))rows.set(subgroup,[]);rows.get(subgroup).push(recipe);
+  }
+  for(const group of groups)for(const [subgroup,recipes] of grouped.get(group) || []) {
+    const section=element('section','recipe-subgroup');
+    section.append(element('h3','',`${recipeFilter==='all'?`${groupInfo(group).label} / `:''}${subgroupLabel(subgroup)}`));
+    const grid=element('div','item-grid');
+    for(const recipe of recipes) {
+      const title=recipeTitle(recipe),button=element('button','item-slot');button.type='button';button.dataset.recipe=recipe.name;
+      const selected=recipe.name===$('recipe-select').value;
+      button.setAttribute('aria-label',`${title}${recipe.name!==recipe.product?` (${recipe.name})`:''}`);
+      button.setAttribute('aria-pressed',String(selected));button.title=`${title}\n${recipe.name}`;
+      const img=element('img');img.src=iconURL(recipe.product);img.alt='';img.loading='lazy';
+      button.append(img,element('span','item-name',title));
+      if(selected)button.append(element('span','item-selected','✓'));
+      button.addEventListener('click',()=>{
+        $('recipe-select').value=recipe.name;recipeChanged();persist();$('recipe-dialog').close();$('choose-product').focus();
+      });grid.append(button);
+    }
+    section.append(grid);results.append(section);
+  }
+  const slots=[...results.querySelectorAll('.item-slot')],selected=slots.find(b=>b.getAttribute('aria-pressed')==='true') || slots[0];
+  for(const slot of slots)slot.tabIndex=slot===selected?0:-1;
+}
 
 function text(id,value) { $(id).textContent=value; }
 function svg(tag,attributes={},content) { const e=document.createElementNS(svgNS,tag); for(const [key,value] of Object.entries(attributes)) e.setAttribute(key,String(value)); if(content!==undefined)e.textContent=content; return e; }
@@ -28,6 +113,7 @@ function request() {
   return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,secondary_inserter:recipeIngredients(recipe).length===2?$('secondary-inserter').value:null,pole:$('pole').value,common_input:$('common-input').checked,reverse_output:$('reverse-output').checked,output_chest:$('store-output').checked?$('output-chest').value:null,input_markers:$('input-markers').checked,max_machines_per_row:$('limit-machines').checked && $('max-machines').value?Number($('max-machines').value):null,max_row_width:$('limit-row-width').checked && $('max-row-width').value?Number($('max-row-width').value):null};
 }
 function restoreOptions(r={}) {
+  r=r || {};
   $('common-input').checked=Boolean(r.common_input);$('input-markers').checked=Boolean(r.input_markers);$('reverse-output').checked=Boolean(r.reverse_output);
   $('store-output').checked=Boolean(r.output_chest);if(r.output_chest)$('output-chest').value=r.output_chest;
   $('limit-machines').checked=Boolean(r.max_machines_per_row);$('max-machines').value=r.max_machines_per_row || 8;$('limit-row-width').checked=Boolean(r.max_row_width);$('max-row-width').value=r.max_row_width || 20;optionsChanged();
@@ -48,7 +134,7 @@ function recipeChanged(preferredMachine=$('machine').value) {
   const recipe=state.catalog.recipes.find(r=>r.name===$('recipe-select').value);
   if(!recipe)return;
   populate('machine',recipe.machines,chooseMachine(recipe,preferredMachine));
-  text('recipe-id',recipe.name);$('product-icon').src=iconURL(recipe.product);
+  text('recipe-id',recipe.name);text('product-name',recipeTitle(recipe));$('product-icon').src=iconURL(recipe.product);
   const ingredients=recipeIngredients(recipe),two=ingredients.length===2;
   $('input-icon').src=iconURL(ingredients[0].item);text('input-label',ingredients.map(i=>label(i.item)).join(' + '));text('output-label',label(recipe.product));
   $('secondary-equipment').hidden=!two;$('secondary-inserter').disabled=!two;$('secondary-inserter').required=two;
@@ -90,7 +176,7 @@ async function initialize() {
     $('config-fields').disabled=false;
     await generate();
   } catch(error) {
-    $('connection-error').hidden=false;text('connection-error-text',error.message);
+    $('connection-error').hidden=false;showError('connection-error-text',error.message);
     text('game-badge','Нет соединения');
     const empty=$('canvas-empty');empty.hidden=false;empty.querySelector('strong').textContent='Не удалось загрузить каталог';empty.querySelector('span:last-child').textContent='Проверьте локальный сервер и повторите загрузку.';
   } finally {$('retry-button').disabled=false;}
@@ -108,6 +194,7 @@ function updateState() {
   $('verify-button').disabled=!have || stale || state.generating || !state.catalog?.verification_available || job?.status==='running';
   $('verify-button').title=!state.catalog?.verification_available ? state.catalog?.verification_hint || 'Загрузка каталога' : stale ? 'Сначала постройте чертёж с новыми параметрами' : '';
   $('generate-button').querySelector('span').textContent=state.generating?'Строим чертёж…':'Построить чертёж';
+  $('rebuild-button').disabled=state.generating;
   $('canvas-busy').hidden=!state.generating;
   const status=state.generating ? {text:'Строим…',tone:'warning'} : stale ? {text:'Параметры изменены',tone:'warning'} : have ? verificationState(job) : {text:'Ожидание',tone:'neutral'};
   $('snapshot-badge').className=`badge ${status.tone}`;text('snapshot-badge',status.text);
@@ -116,12 +203,18 @@ function updateState() {
 
 async function generate(event) {
   event?.preventDefault();
-  if(state.generating || !state.catalog || !$('factory-form').reportValidity())return;
+  if(state.generating || !state.catalog)return;
+  if(!$('factory-form').checkValidity()){
+    if(activePanel!=='config-panel')openPanel('config-panel');
+    $('factory-form').reportValidity();return;
+  }
   const input=request();state.generating=true;showError('generation-error','');$('config-fields').disabled=true;updateState();
   try {
     const artifact=await api('/api/artifacts',{method:'POST',body:JSON.stringify(input)});
+    if(event)closePanel(false);
     setArtifact(artifact);persist();await refreshHistory();
-  } catch(error){showError('generation-error',error.message);}
+    if(event)$('viewport').focus({preventScroll:true});
+  } catch(error){if(activePanel!=='config-panel')openPanel('config-panel');showError('generation-error',error.message);}
   finally{state.generating=false;$('config-fields').disabled=false;updateState();}
 }
 
@@ -211,11 +304,23 @@ function drawFactory(f) {
 
 function applyView() {
   if(!state.view)return;const v=state.view;$('factory-canvas').setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
-  text('zoom-level',`${Math.round(state.fitted.w/v.w*100)}%`);
+  text('zoom-level',`${Math.round((state.fitWidth || state.fitted.w)/v.w*100)}%`);
 }
-function fit(){if(!state.fitted)return;state.view={...state.fitted};applyView();}
+function fit(){
+  if(!state.fitted)return;
+  const b=state.fitted,viewport=$('viewport').getBoundingClientRect();
+  let left=interfaceHidden?24:100,right=24,top=interfaceHidden?24:document.querySelector('.app-header').getBoundingClientRect().bottom+20,bottom=interfaceHidden?24:90;
+  if(!interfaceHidden && viewport.width<=650){left=16;right=16;bottom=148;}
+  if(activePanel && !interfaceHidden){const panel=$(activePanel).getBoundingClientRect();
+    if(panel.width<viewport.width*.7){if(activePanel==='details-panel')right=viewport.width-panel.left+24;else left=panel.right+24;}
+  }
+  const availableW=Math.max(100,viewport.width-left-right),availableH=Math.max(100,viewport.height-top-bottom);
+  const scale=Math.max(b.w/availableW,b.h/availableH),w=viewport.width*scale,h=viewport.height*scale;
+  state.view={x:b.x+b.w/2-(left+availableW/2)*scale,y:b.y+b.h/2-(top+availableH/2)*scale,w,h};
+  state.fitWidth=w;applyView();
+}
 function zoom(factor,at){
-  if(!state.view)return;const v=state.view,ratio=state.fitted.w/v.w,next=ratio*factor;
+  if(!state.view)return;const v=state.view,ratio=(state.fitWidth || state.fitted.w)/v.w,next=ratio*factor;
   if(next<.3 || next>16)return;
   const anchor=at || {x:v.x+v.w/2,y:v.y+v.h/2};const w=v.w/factor,h=v.h/factor;
   state.view={x:anchor.x-(anchor.x-v.x)/factor,y:anchor.y-(anchor.y-v.y)/factor,w,h};applyView();
@@ -225,7 +330,8 @@ function screenPoint(event) {
   return p.matrixTransform($('factory-canvas').getScreenCTM().inverse());
 }
 function focusPoint(x,y) {
-  if(!state.fitted)return;const w=Math.min(22,state.fitted.w),h=w*state.fitted.h/state.fitted.w;
+  closePanel(false);
+  if(!state.fitted)return;const w=Math.min(22,state.fitted.w),h=w*$('viewport').clientHeight/$('viewport').clientWidth;
   state.view={x:x-w/2,y:y-h/2,w,h};applyView();$('viewport').focus({preventScroll:true});$('viewport').scrollIntoView({block:'nearest',behavior:'auto'});
 }
 function inspect(id) {
@@ -351,8 +457,11 @@ async function verify() {
 
 async function refreshHistory() {
   const {artifacts}=await api('/api/artifacts');state.history=artifacts;
-  $('history').hidden=artifacts.length<2;const list=$('history-items');list.replaceChildren();
-  for(const a of artifacts.slice(0,6)){const button=element('button',a.id===state.artifact?.id?'active':'',`${label(a.product)} · ${number(a.rate)}/с`);button.type='button';button.title=verificationState(a.verification).text;button.addEventListener('click',async()=>{try{setArtifact(await api(`/api/artifacts/${a.id}`),true);await refreshHistory();}catch(error){toast(error.message);}});list.append(button);}
+  $('history').hidden=!artifacts.length;$('history-empty').hidden=Boolean(artifacts.length);const list=$('history-items');list.replaceChildren();
+  for(const a of artifacts){const button=element('button',a.id===state.artifact?.id?'active':'');button.type='button';button.title=verificationState(a.verification).text;
+    button.setAttribute('aria-pressed',String(a.id===state.artifact?.id));const img=element('img');img.src=iconURL(a.product);img.alt='';
+    const description=element('span','',`${label(a.product)} · ${number(a.rate)}/с`);description.append(element('small','',verificationState(a.verification).text));button.append(img,description);
+    button.addEventListener('click',async()=>{try{const artifact=await api(`/api/artifacts/${a.id}`);closePanel(false);setArtifact(artifact,true);await refreshHistory();$('viewport').focus({preventScroll:true});}catch(error){toast(error.message);}});list.append(button);}
 }
 
 async function blueprintString(artifact=state.artifact) {
@@ -402,5 +511,49 @@ for(const name of ['ports','verification'])$(name+'-tab').addEventListener('clic
 document.querySelector('.tabs').addEventListener('keydown',event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const current=$('ports-tab').getAttribute('aria-selected')==='true';activateTab(event.key==='Home'?'ports':event.key==='End'?'verification':current?'verification':'ports',true);}});
 for(const id of ['warmup','measure'])$(id).addEventListener('input',()=>text('simulation-summary',`${$('warmup').value} с + ${$('measure').value} с`));
 $('retry-button').addEventListener('click',initialize);
+for(const button of document.querySelectorAll('[data-panel]'))button.addEventListener('click',()=>openPanel(button.dataset.panel,button));
+for(const button of document.querySelectorAll('[data-close-panel]'))button.addEventListener('click',()=>closePanel());
+$('toggle-interface').addEventListener('click',toggleInterface);
+$('choose-product').addEventListener('click',openRecipePicker);
+$('rebuild-button').addEventListener('click',generate);
+$('recipe-search').addEventListener('input',()=>{recipeFilter='all';renderRecipePicker();});
+$('recipe-search').addEventListener('keydown',event=>{
+  const slots=$('recipe-results').querySelectorAll('.item-slot');
+  if(event.key==='ArrowDown' && slots.length){event.preventDefault();slots[0].focus();}
+  if(event.key==='Enter' && slots.length===1){event.preventDefault();slots[0].click();}
+});
+$('recipe-dialog').addEventListener('close',()=>$('choose-product').focus({preventScroll:true}));
+$('reset-recipe-search').addEventListener('click',()=>{recipeFilter='all';$('recipe-search').value='';renderRecipePicker();$('recipe-search').focus();});
+$('recipe-results').addEventListener('keydown',event=>{
+  const current=event.target.closest('.item-slot');if(!current)return;
+  const slots=[...$('recipe-results').querySelectorAll('.item-slot')],index=slots.indexOf(current);
+  let next;
+  if(event.key==='ArrowRight')next=slots[index+1];
+  else if(event.key==='ArrowLeft')next=slots[index-1];
+  else if(event.key==='Home')next=slots[0];
+  else if(event.key==='End')next=slots.at(-1);
+  else if(['ArrowUp','ArrowDown'].includes(event.key)){
+    const rect=current.getBoundingClientRect(),direction=event.key==='ArrowDown'?1:-1;
+    next=slots.filter(slot=>(slot.getBoundingClientRect().top-rect.top)*direction>4).sort((a,b)=>{
+      const score=slot=>{const r=slot.getBoundingClientRect();return Math.abs(r.top-rect.top)*10+Math.abs(r.left-rect.left);};return score(a)-score(b);
+    })[0];
+  }else return;
+  event.preventDefault();if(next){current.tabIndex=-1;next.tabIndex=0;next.focus();}
+});
+document.addEventListener('keydown',event=>{
+  const dialog=document.querySelector('dialog[open]'),editing=event.target.closest('input,select,textarea,[contenteditable="true"]');
+  if(dialog){if(dialog.id==='recipe-dialog' && (event.ctrlKey || event.metaKey) && event.code==='KeyF'){event.preventDefault();$('recipe-search').focus();}return;}
+  if(event.key==='Escape'){closePanel();return;}
+  if(editing || event.ctrlKey || event.metaKey || event.altKey || event.repeat)return;
+  if(event.code==='KeyH'){event.preventDefault();toggleInterface();}
+  if(event.code==='KeyE'){event.preventDefault();openRecipePicker();}
+  if(event.code==='KeyP'){event.preventDefault();openPanel('config-panel');}
+  if(event.code==='KeyI'){event.preventDefault();openPanel('details-panel');}
+});
+new ResizeObserver(()=>fit()).observe($('viewport'));
+new ResizeObserver(()=>{
+  const bottom=document.querySelector('.app-header').getBoundingClientRect().bottom;
+  document.documentElement.style.setProperty('--overlay-top',`${Math.ceil(bottom+16)}px`);fit();
+}).observe(document.querySelector('.app-header'));
 window.addEventListener('pagehide',stopPolling);
 initialize();

@@ -140,6 +140,52 @@ async fn catalogs_only_compatible_recipes_and_generates_exportable_snapshots() {
 }
 
 #[tokio::test]
+async fn catalog_retains_game_recipe_groups_and_item_fallback() {
+    let mut data = common::catalog();
+    let recipe = &mut data
+        .recipes
+        .get_mut("iron-gear-wheel")
+        .unwrap()
+        .prototype
+        .properties;
+    recipe.insert("group".into(), json!("intermediate-products"));
+    recipe.insert("subgroup".into(), json!("intermediate-product"));
+    recipe.insert("order".into(), json!("a[basic]-a[gear]"));
+    let item = &mut data
+        .items
+        .get_mut("iron-plate")
+        .unwrap()
+        .prototype
+        .properties;
+    item.insert("group".into(), json!("modded-materials"));
+    item.insert("subgroup".into(), json!("plates"));
+    let app = application(
+        data,
+        WebOptions {
+            port: 3410,
+            game: None,
+        },
+    );
+    let catalog = json_body(
+        app.oneshot(request("GET", "/api/catalog", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let recipes = catalog["recipes"].as_array().unwrap();
+    let gear = recipes
+        .iter()
+        .find(|r| r["name"] == "iron-gear-wheel")
+        .unwrap();
+    assert_eq!(gear["group"], "intermediate-products");
+    assert_eq!(gear["subgroup"], "intermediate-product");
+    assert_eq!(gear["order"], "a[basic]-a[gear]");
+    let plate = recipes.iter().find(|r| r["name"] == "iron-plate").unwrap();
+    assert_eq!(plate["group"], "modded-materials");
+    assert_eq!(plate["subgroup"], "plates");
+}
+
+#[tokio::test]
 async fn catalog_and_exports_include_both_solid_ingredients() {
     let app = app();
     let catalog = json_body(
