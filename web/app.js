@@ -1,5 +1,6 @@
 import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputBelts, inputRequirements, recipeIngredients, itemGroups, groupInfo, subgroupLabel, recipeGroup, recipeTitle, filterRecipes } from './model.js';
 import { transportLayout, transportSymbols, transportTile, transportDevice, transportPalette, directionLabel } from './transport.js';
+import { entitySymbols, entitySprite, wirePoint } from './entities.js';
 
 const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -241,10 +242,11 @@ function setArtifact(artifact,restoreForm=false) {
 
 function drawFactory(f) {
   const requirements=inputRequirements(f);
-  document.querySelector('.legend-belt').style.backgroundColor=transportPalette(f.request.belt).rail;
-  const scene=$('scene');scene.replaceChildren(transportSymbols(svg,f.request.belt,state.catalog.transport_sprites),svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
-  const powerGroup=svg('g',{'data-layer':'power'}),wireGroup=svg('g',{'data-layer':'wires'}),tunnelGroup=svg('g',{'data-layer':'tunnels','pointer-events':'none'}),bodyGroup=svg('g'),portsGroup=svg('g',{'data-layer':'ports'});
+  const graphics=state.catalog.entity_graphics;
   const entities=f.document.blueprint.entities,byID=new Map(entities.map(e=>[e.entity_number,e]));
+  document.querySelector('.legend-belt').style.backgroundColor=transportPalette(f.request.belt).rail;
+  const scene=$('scene');scene.replaceChildren(transportSymbols(svg,f.request.belt,state.catalog.transport_sprites),entitySymbols(svg,graphics,entities),svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
+  const powerGroup=svg('g',{'data-layer':'power'}),wireGroup=svg('g',{'data-layer':'wires'}),tunnelGroup=svg('g',{'data-layer':'tunnels','pointer-events':'none'}),transportGroup=svg('g'),shadowGroup=svg('g'),bodyGroup=svg('g'),armGroup=svg('g'),portsGroup=svg('g',{'data-layer':'ports'});
   const transport=transportLayout(entities,f.request.belt,f.bus);
   for(const {input,output} of transport.tunnels){
     const a=input.position,b=output.position,d=`M ${a.x} ${a.y} L ${b.x} ${b.y}`;
@@ -252,7 +254,8 @@ function drawFactory(f) {
     tunnelGroup.append(svg('path',{d,fill:'none',stroke:transportPalette(f.request.belt).arrow,'stroke-width':.045,'stroke-dasharray':'.14 .22','stroke-opacity':.4}));
   }
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
-  for(const e of entities) {
+  const floor=e=>[f.request.belt,f.bus?.splitter,f.bus?.underground].includes(e.name)?0:1;
+  for(const e of [...entities].sort((a,b)=>floor(a)-floor(b) || a.position.y-b.position.y || a.position.x-b.position.x)) {
     const size=f.entity_sizes[e.name],rotated=[4,12].includes(e.direction);
     const [w,h]=rotated?[size[1],size[0]]:size,x=e.position.x,y=e.position.y;
     const isPole=e.name===f.request.pole;
@@ -260,7 +263,15 @@ function drawFactory(f) {
     x0=Math.min(x0,x-radius);x1=Math.max(x1,x+radius);y0=Math.min(y0,y-(isPole?radius:h/2));y1=Math.max(y1,y+(isPole?radius:h/2));
     if(isPole){const r=f.power.supply_area_distance;powerGroup.append(svg('rect',{x:x-r,y:y-r,width:2*r,height:2*r,fill:'#91d9ad','fill-opacity':.035,stroke:'#91d9ad','stroke-opacity':.23,'stroke-width':.045}));}
     const group=svg('g',{'data-entity':e.entity_number});group.append(svg('title',{},`${label(e.name)} · #${e.entity_number}${e.name===f.request.belt || e.name===f.bus?.splitter || e.name===f.bus?.underground?` · ${directionLabel(e.direction)}${e.type?` · ${e.type==='input'?'Вход под землю':'Выход на поверхность'}`:''}`:''}`));
-    if(e.name===f.request.machine){
+    const native=entitySprite(svg,e,graphics,w,h);
+    if(native){
+      group.append(native.body,native.hitbox);shadowGroup.append(native.shadow);armGroup.append(native.arm);
+      x0=Math.min(x0,native.bounds.left);y0=Math.min(y0,native.bounds.top);x1=Math.max(x1,native.bounds.right);y1=Math.max(y1,native.bounds.bottom);
+      if(e.name==='constant-combinator'){
+        const marker=f.markers?.find(m=>m.entity_number===e.entity_number);
+        if(marker)group.append(svg('image',{href:iconURL(marker.item),x:x-.22,y:y-.22,width:.44,height:.44,'pointer-events':'none'}));
+      }
+    } else if(e.name===f.request.machine){
       group.append(svg('rect',{class:'entity-body',x:x-w/2+.06,y:y-h/2+.06,width:w-.12,height:h-.12,rx:.14,fill:'#24453e',stroke:'#70ad99','stroke-width':.06}));
       const size=Math.min(w,h)*.64;group.append(svg('image',{href:iconURL(e.name),x:x-size/2,y:y-size/2,width:size,height:size,'pointer-events':'none'}));
     } else if(e.name===f.request.belt){
@@ -284,9 +295,9 @@ function drawFactory(f) {
       group.append(svg('rect',{class:'entity-body',x:x-w/2+.12,y:y-h/2+.12,width:w-.24,height:h-.24,rx:.06,fill:'#776747',stroke:'#dac48b','stroke-width':.06}));
       group.append(svg('image',{href:iconURL(e.name),x:x-w*.38,y:y-h*.38,width:w*.76,height:h*.76,'pointer-events':'none'}));
     }
-    bodyGroup.append(group);
+    (floor(e)===0?transportGroup:bodyGroup).append(group);
   }
-  for(const [a,,b] of f.document.blueprint.wires){const p=byID.get(a).position,q=byID.get(b).position;wireGroup.append(svg('path',{d:`M ${p.x} ${p.y} Q ${(p.x+q.x)/2} ${(p.y+q.y)/2+.3} ${q.x} ${q.y}`,fill:'none',stroke:'#dbb96d','stroke-opacity':.75,'stroke-width':.045}));}
+  for(const [a,,b] of f.document.blueprint.wires){const p=wirePoint(byID.get(a),graphics),q=wirePoint(byID.get(b),graphics);wireGroup.append(svg('path',{d:`M ${p.x} ${p.y} Q ${(p.x+q.x)/2} ${(p.y+q.y)/2+.3} ${q.x} ${q.y}`,fill:'none',stroke:'#dbb96d','stroke-opacity':.75,'stroke-width':.045}));}
   for(const [ports,isOutput] of [[inputBelts(f),false],[f.storage?.length ? f.storage.map(b=>({...byID.get(b.chests[0]),storage:true,direction:f.request.reverse_output?12:4})) : outputPorts(f),true]]) {
     ports.forEach((port,i)=>{
       const x=port.position.x,y=port.position.y,color=isOutput?'#edbd65':'#85d9ba';
@@ -302,7 +313,7 @@ function drawFactory(f) {
   }
   const p=f.power.connection_position;
   portsGroup.append(svg('circle',{cx:p.x,cy:p.y,r:.65,fill:'none',stroke:'#c9b5ec','stroke-width':.08,'stroke-dasharray':'.15 .12'}));
-  scene.append(powerGroup,tunnelGroup,wireGroup,bodyGroup,portsGroup);
+  scene.append(powerGroup,tunnelGroup,transportGroup,shadowGroup,bodyGroup,armGroup,wireGroup,portsGroup);
   const bounds={x:x0-8,y:y0-3,w:x1-x0+16,h:y1-y0+6};
   state.fitted=bounds;fit();
 }

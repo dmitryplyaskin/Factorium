@@ -117,6 +117,104 @@ async fn transport_sprites_come_from_the_configured_game_and_missing_art_is_expl
 }
 
 #[tokio::test]
+async fn entity_sprites_require_complete_matching_game_art_and_serve_only_listed_files() {
+    let empty = json_body(
+        app()
+            .oneshot(request("GET", "/api/catalog", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(empty["entity_graphics"]["entities"], json!({}));
+    let metadata: Value =
+        serde_json::from_str(include_str!("../web/entity-graphics.json")).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let definition = &metadata["entities"]["assembling-machine-2"];
+    let mut last_id = String::new();
+    for layer in definition["directions"]["0"]["layers"].as_array().unwrap() {
+        let id = layer["asset"].as_str().unwrap();
+        let asset = &metadata["assets"][id];
+        let path = directory.path().join(asset["file"].as_str().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend((asset["width"].as_u64().unwrap() as u32).to_be_bytes());
+        png.extend((asset["height"].as_u64().unwrap() as u32).to_be_bytes());
+        std::fs::write(path, png).unwrap();
+        last_id = id.to_owned();
+    }
+    let make_app = || {
+        let mut game = ExtractOptions::new("unused-factorio");
+        game.data_directory = Some(directory.path().to_owned());
+        application(
+            common::catalog(),
+            WebOptions {
+                port: 3410,
+                game: Some(game),
+            },
+        )
+    };
+    let router = make_app();
+    let catalog = json_body(
+        router
+            .clone()
+            .oneshot(request("GET", "/api/catalog", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        catalog["entity_graphics"]["entities"]["assembling-machine-2"]["kind"],
+        "assembling-machine"
+    );
+    assert!(
+        !catalog["entity_graphics"]["entities"]
+            .as_object()
+            .unwrap()
+            .contains_key("electric-furnace")
+    );
+    let image = router
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/entity-sprites/{last_id}"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(image.status(), StatusCode::OK);
+    assert_eq!(image.headers()["content-type"], "image/png");
+    assert_eq!(
+        router
+            .oneshot(request(
+                "GET",
+                "/api/entity-sprites/not-in-manifest",
+                Value::Null
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let file = directory
+        .path()
+        .join(metadata["assets"][&last_id]["file"].as_str().unwrap());
+    std::fs::write(file, b"changed texture").unwrap();
+    let partial = json_body(
+        make_app()
+            .oneshot(request("GET", "/api/catalog", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        !partial["entity_graphics"]["entities"]
+            .as_object()
+            .unwrap()
+            .contains_key("assembling-machine-2")
+    );
+}
+
+#[tokio::test]
 async fn catalogs_only_compatible_recipes_and_generates_exportable_snapshots() {
     let app = app();
     let response = app

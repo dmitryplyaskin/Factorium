@@ -1,6 +1,8 @@
 //! Loopback-only UI/API. Generated artifacts are immutable snapshots; verification
 //! belongs to their ID, never to the current contents of the browser form.
 
+mod graphics;
+
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -40,6 +42,7 @@ struct AppState {
     game: Arc<Option<ExtractOptions>>,
     icons: Arc<HashMap<String, Vec<u8>>>,
     transport_sprites: Arc<HashMap<String, Vec<u8>>>,
+    entity_sprites: Arc<HashMap<String, std::path::PathBuf>>,
     records: Arc<Mutex<VecDeque<Arc<Artifact>>>>,
     generation_slots: Arc<Semaphore>,
     game_slot: Arc<Semaphore>,
@@ -312,12 +315,15 @@ impl AppState {
         let mut sprite_names: Vec<_> = transport_sprites.keys().collect();
         sprite_names.sort();
         response["transport_sprites"] = json!(sprite_names);
+        let entity_graphics = graphics::load(&catalog, game_data_root(game.as_ref()).as_deref());
+        response["entity_graphics"] = entity_graphics.manifest;
         Self {
             catalog: Arc::new(catalog),
             catalog_response: Arc::new(response),
             game: Arc::new(game),
             icons: Arc::new(icons),
             transport_sprites: Arc::new(transport_sprites),
+            entity_sprites: Arc::new(entity_graphics.files),
             records: Arc::new(Mutex::new(VecDeque::new())),
             generation_slots: Arc::new(Semaphore::new(2)),
             game_slot: Arc::new(Semaphore::new(1)),
@@ -346,11 +352,13 @@ fn router(state: AppState) -> Router {
         .route("/app.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/app.js"))}))
         .route("/model.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/model.js"))}))
         .route("/transport.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/transport.js"))}))
+        .route("/entities.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/entities.js"))}))
         .route("/style.css",get(||async{asset("text/css; charset=utf-8",include_str!("../web/style.css"))}))
         .route("/favicon.svg",get(||async{asset("image/svg+xml",r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#efbe61"/><path d="M9 8h16v5H14v4h8v5h-8v5H9z" fill="#171b20"/></svg>"##)}))
         .route("/api/catalog",get(catalog))
         .route("/api/icons/{name}",get(icon))
         .route("/api/transport-sprites/{name}",get(transport_sprite))
+        .route("/api/entity-sprites/{name}",get(entity_sprite))
         .route("/api/artifacts",get(history).post(generate))
         .route("/api/artifacts/{id}",get(artifact))
         .route("/api/artifacts/{id}/verification",get(verification).post(verify))
@@ -436,6 +444,15 @@ async fn transport_sprite(State(s): State<AppState>, Path(name): Path<String>) -
         Some(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes.clone()).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn entity_sprite(State(s): State<AppState>, Path(name): Path<String>) -> Response {
+    if let Some(file) = s.entity_sprites.get(&name) {
+        if let Ok(bytes) = std::fs::read(file) {
+            return ([(header::CONTENT_TYPE, "image/png")], bytes).into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
 }
 
 async fn icon(State(s): State<AppState>, Path(name): Path<String>) -> Response {
