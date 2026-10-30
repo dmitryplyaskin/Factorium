@@ -1,5 +1,6 @@
 //! Single-recipe solid production lines. Layout and power use game prototypes.
 
+mod compact_bus;
 mod infrastructure;
 mod infrastructure_check;
 mod layout;
@@ -103,6 +104,8 @@ pub struct BusLine {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputBus {
+    #[serde(default)]
+    pub compact: bool,
     pub splitter: String,
     pub underground: String,
     pub lines: Vec<BusLine>,
@@ -131,6 +134,9 @@ pub struct ProductionRow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_inputs: Vec<BeltPort>,
     pub output: BeltPort,
+    /// End of the production belt before the optional output collector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_output: Option<BeltPort>,
 }
 
 impl ProductionRow {
@@ -932,7 +938,9 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                     .collect::<std::collections::BTreeSet<_>>()
                     .len()
             );
-            if bus.is_some() && !request.reverse_output {
+            if bus.as_ref().is_some_and(|b| b.compact) {
+                doc.blueprint.description.push_str(" Compact shared bus: ingredient belts enter from the west; splitters branch locally beside their production rows. Output belts are collected below the rows.");
+            } else if bus.is_some() && !request.reverse_output {
                 doc.blueprint.description.push_str(" Shared bus: connect separate ingredient belts from the north; splitters redistribute flow between rows.");
             }
             if request.reverse_output {

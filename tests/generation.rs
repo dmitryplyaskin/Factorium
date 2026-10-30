@@ -7,6 +7,79 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use factorium::{FactoryRequest, generate_blueprint, validate_factory};
 
 #[test]
+fn compact_bus_keeps_sixty_plate_inlets_local_and_collects_outputs_below_rows() -> Result<()> {
+    let mut raw = common::catalog_value();
+    raw["recipes"]["iron-plate"]["energy"] = json!(3.2);
+    let data = serde_json::from_value(raw)?;
+    for reverse in [true, false] {
+        let mut r = FactoryRequest::new("iron-plate", 60.0);
+        r.machine = "electric-furnace".into();
+        r.belt = "fast-transport-belt".into();
+        r.common_input = true;
+        r.reverse_output = reverse;
+        r.input_markers = true;
+        let f = generate_blueprint(&data, &r)?;
+        validate_factory(&data, &f)?;
+        let bus = f.bus.as_ref().unwrap();
+        assert!(bus.compact);
+        assert_eq!(bus.lines.len(), 3);
+        let mut inputs = f.external_inputs();
+        inputs.sort_by(|a, b| a.position.y.total_cmp(&b.position.y));
+        assert!(inputs.windows(2).all(
+            |p| p[1].position.y - p[0].position.y == 1.0 && p[0].position.x == p[1].position.x
+        ));
+        let top = f
+            .input_ports()
+            .map(|p| p.position.y)
+            .fold(f64::INFINITY, f64::min);
+        assert!(top - inputs[0].position.y <= 3.0);
+        for line in &bus.lines {
+            let first = f
+                .input_ports()
+                .filter(|p| line.targets.contains(&p.entity_number))
+                .map(|p| p.position.y)
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                line.entities
+                    .iter()
+                    .map(|&id| &f.document.blueprint.entities[(id - 1) as usize])
+                    .filter(|e| e.name == bus.splitter)
+                    .all(|e| e.position.y >= first),
+                "Branches must start at their first production row, not above the factory"
+            );
+        }
+        let outputs = f.output_ports();
+        assert_eq!(outputs.len(), 3);
+        let bottom = f
+            .input_ports()
+            .map(|p| p.position.y)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(outputs.iter().all(|p| p.position.y > bottom));
+        assert!(outputs.windows(2).all(
+            |p| p[1].position.y - p[0].position.y == 1.0 && p[0].position.x == p[1].position.x
+        ));
+        if reverse {
+            assert!(f.rows[0].input.position.x - inputs[0].position.x <= 18.0);
+            assert!(
+                f.document
+                    .blueprint
+                    .entities
+                    .iter()
+                    .filter(|e| e.name == bus.underground)
+                    .count()
+                    <= 16
+            );
+        }
+        let mut bad = f.clone();
+        bad.rows[0].production_output.as_mut().unwrap().rate += 1.0;
+        assert!(validate_factory(&data, &bad).is_err());
+        let roundtrip = serde_json::from_value(serde_json::to_value(&f)?)?;
+        validate_factory(&data, &roundtrip)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn small_poles_follow_matching_regular_lines_between_furnace_inserters() -> Result<()> {
     let mut raw = common::catalog_value();
     raw["recipes"]["iron-plate"]["energy"] = json!(3.2);
@@ -110,8 +183,8 @@ fn reverse_output_keeps_ports_and_storage_on_the_input_side() -> Result<()> {
                         .blueprint
                         .entities
                         .iter_mut()
-                        .find(|e| e.direction == 12 && e.belt_type.as_deref() == Some("output"))
-                        .expect("reversed outputs cross the bus underground");
+                        .find(|e| e.belt_type.as_deref() == Some("output"))
+                        .expect("compact routes have underground crossings");
                     crossing.belt_type = Some("input".into());
                     assert!(validate_factory(&data, &bad).is_err());
                 }
@@ -135,10 +208,11 @@ fn optional_bus_storage_markers_and_both_row_limits_are_validated() -> Result<()
     r.max_row_width = Some(14);
     let f = generate_blueprint(&data, &r)?;
     validate_factory(&data, &f)?;
-    assert!(
-        f.rows.iter().all(|row| row.machines.len() <= 4
-            && row.output.position.x - row.input.position.x + 1.0 <= 14.0)
-    );
+    assert!(f.bus.as_ref().unwrap().compact);
+    assert!(f.rows.iter().all(|row| {
+        let port = row.production_output.as_ref().unwrap_or(&row.output);
+        row.machines.len() <= 4 && port.position.x - row.input.position.x + 1.0 <= 14.0
+    }));
     assert_eq!(f.external_inputs().len(), 2);
     assert_eq!(f.markers.len(), 2);
     assert_eq!(f.storage.len(), f.output_ports().len());
@@ -208,6 +282,7 @@ fn large_bus_flows_keep_ingredient_partitions_and_crossings_intact() -> Result<(
     r.max_machines_per_row = Some(4);
     let f = generate_blueprint(&data, &r)?;
     let bus = f.bus.as_ref().unwrap();
+    assert!(bus.compact);
     assert!(bus.lines.len() >= 4);
     assert!(
         bus.lines

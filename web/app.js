@@ -250,7 +250,7 @@ function renderPorts(f) {
     const itemCell=element('td','',item);if(hint)itemCell.append(element('span','port-hint',hint));
     const rateCell=element('td','',rate),pointCell=element('td'),button=element('button','coordinate-button',`${number(position.x)}; ${number(position.y)}`);button.type='button';button.setAttribute('aria-label',`Показать на схеме: ${name}`);button.addEventListener('click',()=>focusPoint(position.x,position.y));pointCell.append(button);tr.append(nameCell,itemCell,rateCell,pointCell);body.append(tr);
   };
-  inputs.forEach((port,i)=>add(`Вход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',f.bus?`Шина ${f.request.reverse_output?'с запада':'с севера'} · рядов: ${port.targets.length} · обе полосы`:`Ряд ${port.row_index} · ${port.ingredient_index===1?'дальняя':'ближняя'} лента · обе полосы`));
+  inputs.forEach((port,i)=>add(`Вход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',f.bus?`Шина ${port.direction===4?'с запада':'с севера'} · рядов: ${port.targets.length} · обе полосы`:`Ряд ${port.row_index} · ${port.ingredient_index===1?'дальняя':'ближняя'} лента · обе полосы`));
   outputs.forEach((port,i)=>{
     const bank=f.storage?.find(b=>b.output_entity===port.entity_number),chest=bank && f.document.blueprint.entities.find(e=>e.entity_number===bank.chests[0]);
     const lanes=port.lanes==='both'?`Левая ${number(port.left_rate)}/с · правая ${number(port.right_rate)}/с`:`${port.lanes==='left'?'Левая':'Правая'} полоса`;

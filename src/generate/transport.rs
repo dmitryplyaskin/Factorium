@@ -64,7 +64,7 @@ pub(super) fn validate(
             && e.position.y + b.right_bottom.y > f64::from(tile.1)
             && e.position.y + b.left_top.y < f64::from(tile.1 + 1))
     };
-    let walk = |start: u32, stop: Option<u32>, direction: u8| -> Result<Vec<u32>> {
+    let walk = |start: u32, stop: Option<u32>, direction: Option<u8>| -> Result<Vec<u32>> {
         let mut path = Vec::new();
         let mut seen = BTreeSet::new();
         let mut current = start;
@@ -77,7 +77,7 @@ pub(super) fn validate(
                 "Port is not a belt"
             );
             ensure!(
-                e.direction == direction,
+                direction.is_none_or(|direction| e.direction == direction),
                 "Production belt has wrong direction"
             );
             path.push(current);
@@ -88,7 +88,13 @@ pub(super) fn validate(
                 );
                 break;
             }
-            let step = if direction == 12 { -1 } else { 1 };
+            let (dx, dy) = match e.direction {
+                0 => (0, -1),
+                4 => (1, 0),
+                8 => (0, 1),
+                12 => (-1, 0),
+                _ => anyhow::bail!("Invalid belt direction"),
+            };
             if underground.is_some() && e.belt_type.as_deref() == Some("input") {
                 let reach = entity(data, &e.name)?.prototype.properties["max_underground_distance"]
                     .as_u64()
@@ -97,13 +103,13 @@ pub(super) fn validate(
                     .find_map(|n| {
                         occupied
                             .get(&(
-                                e.position.x.floor() as i32 + step * n,
-                                e.position.y.floor() as i32,
+                                e.position.x.floor() as i32 + dx * n,
+                                e.position.y.floor() as i32 + dy * n,
                             ))
                             .and_then(|id| ids.get(id))
                             .filter(|other| {
                                 other.name == e.name
-                                    && other.direction == direction
+                                    && other.direction == e.direction
                                     && other.belt_type.as_deref() == Some("output")
                             })
                             .map(|other| other.entity_number)
@@ -116,14 +122,26 @@ pub(super) fn validate(
                 "Invalid output underground belt type"
             );
             let next = (
-                e.position.x.floor() as i32 + step,
-                e.position.y.floor() as i32,
+                e.position.x.floor() as i32 + dx,
+                e.position.y.floor() as i32 + dy,
             );
             match occupied.get(&next).and_then(|id| ids.get(id)) {
                 Some(e)
                     if e.name == f.request.belt
                         || f.bus.as_ref().is_some_and(|b| e.name == b.underground) =>
                 {
+                    let from = ids[&current];
+                    ensure!(
+                        e.direction != (from.direction + 8) % 16,
+                        "Output route enters the front of a belt"
+                    );
+                    if e.name != f.request.belt {
+                        ensure!(
+                            e.direction == from.direction
+                                && e.belt_type.as_deref() == Some("input"),
+                            "Output route enters underground from the wrong side"
+                        );
+                    }
                     current = e.entity_number
                 }
                 _ => break,
@@ -187,7 +205,7 @@ pub(super) fn validate(
                     .is_some_and(|e| e.position == port.position),
                 "Input port coordinates mismatch"
             );
-            let path = walk(port.entity_number, None, 4)?;
+            let path = walk(port.entity_number, None, Some(4))?;
             ensure!(
                 f.request
                     .max_row_width
@@ -203,10 +221,32 @@ pub(super) fn validate(
             input_lines.push(path);
             input_rates[i] += port.rate;
         }
-        let last = ids[&row.output.entity_number];
+        let production = row.production_output.as_ref().unwrap_or(&row.output);
+        if row.production_output.is_some() {
+            ensure!(
+                f.bus.as_ref().is_some_and(|b| b.compact),
+                "Output collector requires a compact bus"
+            );
+            ensure!(
+                production.item == row.output.item
+                    && production.lanes == row.output.lanes
+                    && production.rate == row.output.rate
+                    && production.direction == row.output.direction,
+                "Output collector changes material flow or lane assignment"
+            );
+        }
+        let last = ids
+            .get(&production.entity_number)
+            .context("Missing production output")?;
+        ensure!(
+            last.position == production.position,
+            "Production output coordinates mismatch"
+        );
         let direction = if f.request.reverse_output { 12 } else { 4 };
         ensure!(
-            row.output.direction == direction && last.direction == direction,
+            row.output.direction == direction
+                && last.direction == direction
+                && ids[&row.output.entity_number].direction == direction,
             "Output port direction does not match the requested side"
         );
         if f.request.reverse_output {
@@ -235,11 +275,11 @@ pub(super) fn validate(
             .context("Missing output line")?;
         let output_line = walk(
             first.entity_number,
-            Some(row.output.entity_number),
-            direction,
+            Some(production.entity_number),
+            Some(direction),
         )?;
         ensure!(
-            output_line.last() == Some(&row.output.entity_number),
+            output_line.last() == Some(&production.entity_number),
             "Output port is not the end of its belt"
         );
         if let Some(path) = output_paths.get(&row.output.entity_number) {
@@ -253,6 +293,23 @@ pub(super) fn validate(
                     used_belts.insert(id),
                     "Output belt overlaps another input/output path"
                 );
+            }
+            if row.production_output.is_some() {
+                let collector = walk(
+                    production.entity_number,
+                    Some(row.output.entity_number),
+                    None,
+                )?;
+                ensure!(
+                    collector.last() == Some(&row.output.entity_number),
+                    "Disconnected output collector"
+                );
+                for &id in collector.iter().skip(1) {
+                    ensure!(
+                        used_belts.insert(id),
+                        "Output collector overlaps another transport route"
+                    );
+                }
             }
             output_paths.insert(row.output.entity_number, output_line.clone());
         }

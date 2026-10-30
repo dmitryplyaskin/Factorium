@@ -27,7 +27,7 @@ pub(super) fn outputs(rows: &[ProductionRow]) -> Vec<BeltPort> {
     ports
 }
 
-fn matching<'a>(
+pub(super) fn matching<'a>(
     data: &'a GameData,
     belt: &Entity,
     kind: &str,
@@ -64,8 +64,10 @@ pub(super) fn place(
     } else {
         None
     };
-    if request.reverse_output {
-        if let Some(bus) = &bus {
+    if let Some(bus) = &bus {
+        if bus.compact {
+            super::compact_bus::collect_outputs(data, request, rows, doc, bus)?;
+        } else if request.reverse_output {
             return_outputs(request, rows, doc, bus)?;
         }
     }
@@ -98,6 +100,13 @@ fn place_bus(
     doc: &mut BlueprintDocument,
     belt_rate: f64,
 ) -> Result<InputBus> {
+    // Retain the previous router for catalogs whose underground equipment
+    // cannot cross the compact corridors without collisions.
+    let mut compact = doc.clone();
+    if let Ok(bus) = super::compact_bus::place(data, request, rows, &mut compact, belt_rate) {
+        *doc = compact;
+        return Ok(bus);
+    }
     let belt = entity(data, &request.belt)?;
     let splitter = matching(data, belt, "splitter", [2, 1])?;
     let underground = matching(data, belt, "underground-belt", [1, 1])?;
@@ -223,6 +232,7 @@ fn place_bus(
         }
     }
     Ok(InputBus {
+        compact: false,
         splitter: splitter.prototype.name.clone(),
         underground: underground.prototype.name.clone(),
         lines,

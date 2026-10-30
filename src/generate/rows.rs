@@ -99,6 +99,7 @@ impl Production<'_> {
             .collect();
         let input = ports.remove(0);
         ProductionRow {
+            production_output: None,
             machines,
             input,
             additional_inputs: ports,

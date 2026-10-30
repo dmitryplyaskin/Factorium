@@ -79,7 +79,12 @@ pub(super) fn validate(
                 .context("Missing bus inlet")?;
             ensure!(
                 source.name == f.request.belt
-                    && source.direction == if f.request.reverse_output { 4 } else { 8 }
+                    && source.direction
+                        == if bus.compact || f.request.reverse_output {
+                            4
+                        } else {
+                            8
+                        }
                     && line.source.direction == source.direction
                     && source.position == line.source.position
                     && line.source.lanes == "both",
@@ -139,10 +144,17 @@ pub(super) fn validate(
                     paired = true;
                 } else {
                     let positions = if e.name == bus.splitter {
-                        ensure!(e.direction == 8, "Bus splitter must face south");
-                        let x = (e.position.x - 1.0).round() as i32;
-                        let y = e.position.y.floor() as i32;
-                        vec![(x, y + 1), (x + 1, y + 1)]
+                        if bus.compact {
+                            ensure!(e.direction == 4, "Compact bus splitter must face east");
+                            let x = e.position.x.floor() as i32;
+                            let y = (e.position.y - 1.0).round() as i32;
+                            vec![(x + 1, y), (x + 1, y + 1)]
+                        } else {
+                            ensure!(e.direction == 8, "Bus splitter must face south");
+                            let x = (e.position.x - 1.0).round() as i32;
+                            let y = e.position.y.floor() as i32;
+                            vec![(x, y + 1), (x + 1, y + 1)]
+                        }
                     } else {
                         ensure!(
                             e.name == f.request.belt

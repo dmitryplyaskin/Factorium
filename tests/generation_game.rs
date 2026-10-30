@@ -5,6 +5,38 @@ use factorium::{
 };
 
 #[test]
+#[ignore = "requires Factorio; cargo test --release --test generation_game compact_bus -- --ignored --nocapture"]
+fn compact_bus_transports_sixty_plates_through_both_output_directions() -> Result<()> {
+    let binary = discover_factorio()?;
+    let mut game = ExtractOptions::new(&binary);
+    game.mod_directory = discover_mod_directory(&binary);
+    let export = tempfile::tempdir()?;
+    let data = extract_game_data(&game, export.path())?;
+    for reverse in [true, false] {
+        let mut r = FactoryRequest::new("iron-plate", 60.0);
+        r.machine = "electric-furnace".into();
+        r.belt = "fast-transport-belt".into();
+        r.common_input = true;
+        r.reverse_output = reverse;
+        r.input_markers = true;
+        let factory = generate_blueprint(&data, &r)?;
+        assert!(factory.bus.as_ref().unwrap().compact);
+        assert_eq!(factory.external_inputs().len(), 3);
+        assert_eq!(factory.output_ports().len(), 3);
+        let report = verify_in_game(&data, &factory, &game, &SimulationOptions::default())?;
+        eprintln!(
+            "Compact 60 plates/s, reverse={reverse}: {:.3}/s",
+            report.measured_output_per_second
+        );
+        assert!(report.passed, "{report:#?}");
+        assert_eq!(report.network_count, 1);
+        assert!(report.unpowered_entities.is_empty());
+        assert!(report.row_outputs.iter().all(|r| r.delivered_items > 0));
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires Factorio 2.1.24+; cargo test --test generation_game -- --ignored --nocapture"]
 fn measures_blueprint_import_throughput_and_power_in_the_real_game() -> Result<()> {
     let binary = discover_factorio()?;
