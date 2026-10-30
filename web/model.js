@@ -19,7 +19,7 @@ const labels = {
 export function label(name) { return labels[name] || name; }
 export function number(value, digits = 3) { return Number.isFinite(Number(value)) ? new Intl.NumberFormat('ru-RU', { maximumFractionDigits: digits }).format(Number(value)) : '—'; }
 export function power(watts) { return watts >= 1e6 ? `${number(watts/1e6,2)} МВт` : watts >= 1000 ? `${number(watts/1000,1)} кВт` : `${number(watts,0)} Вт`; }
-export function sameRequest(a,b) { return Boolean(a && b && ['product','recipe','machine','belt','inserter','secondary_inserter','pole','output_chest'].every(key => (a[key] || null) === (b[key] || null)) && ['common_input','input_markers'].every(key=>Boolean(a[key])===Boolean(b[key])) && ['max_machines_per_row','max_row_width'].every(key=>(a[key] ? Number(a[key]) : null)===(b[key] ? Number(b[key]) : null)) && Number.isFinite(Number(a.rate)) && Number(a.rate) === Number(b.rate)); }
+export function sameRequest(a,b) { return Boolean(a && b && ['product','recipe','machine','belt','inserter','secondary_inserter','pole','output_chest'].every(key => (a[key] || null) === (b[key] || null)) && ['common_input','reverse_output','input_markers'].every(key=>Boolean(a[key])===Boolean(b[key])) && ['max_machines_per_row','max_row_width'].every(key=>(a[key] ? Number(a[key]) : null)===(b[key] ? Number(b[key]) : null)) && Number.isFinite(Number(a.rate)) && Number(a.rate) === Number(b.rate)); }
 export function chooseMachine(recipe, current) {
   const allowed = recipe?.machines || [];
   return [current,'assembling-machine-2','electric-furnace','assembling-machine-1','assembling-machine-3',...allowed].find(name => allowed.includes(name)) || '';

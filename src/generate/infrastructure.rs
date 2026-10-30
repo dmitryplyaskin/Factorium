@@ -55,7 +55,7 @@ pub(super) struct Rates {
 pub(super) fn place(
     data: &GameData,
     request: &FactoryRequest,
-    rows: &[ProductionRow],
+    rows: &mut [ProductionRow],
     doc: &mut BlueprintDocument,
     rates: Rates,
 ) -> Result<(Option<InputBus>, Vec<OutputStorage>, Vec<InputMarker>)> {
@@ -64,6 +64,11 @@ pub(super) fn place(
     } else {
         None
     };
+    if request.reverse_output {
+        if let Some(bus) = &bus {
+            return_outputs(request, rows, doc, bus)?;
+        }
+    }
     let storage = if let Some(chest) = &request.output_chest {
         place_storage(data, request, rows, doc, chest, rates)?
     } else {
@@ -187,11 +192,94 @@ fn place_bus(
             entities: added,
         });
     }
+    if request.reverse_output {
+        // The former north-facing sources become internal junctions. Nested
+        // approaches above the tree expose every ingredient on the west edge.
+        let west = all_columns.iter().min().unwrap() - 4;
+        let count = lines.len() as i32;
+        for (i, line) in lines.iter_mut().enumerate() {
+            let x = line.source.position.x.floor() as i32;
+            let y = start_y - 3 * (count - i as i32);
+            let source = doc.blueprint.entities.len() as u32 + 1;
+            for tx in west..=x {
+                line.entities.push(doc.add(
+                    &request.belt,
+                    f64::from(tx) + 0.5,
+                    f64::from(y) + 0.5,
+                    if tx == x { 8 } else { 4 },
+                ));
+            }
+            for ty in y + 1..start_y {
+                line.entities.push(doc.add(
+                    &request.belt,
+                    f64::from(x) + 0.5,
+                    f64::from(ty) + 0.5,
+                    8,
+                ));
+            }
+            line.source.entity_number = source;
+            line.source.position = doc.blueprint.entities[(source - 1) as usize].position;
+            line.source.direction = 4;
+        }
+    }
     Ok(InputBus {
         splitter: splitter.prototype.name.clone(),
         underground: underground.prototype.name.clone(),
         lines,
     })
+}
+
+/// Cross input trunks underground so both lanes remain independent all the
+/// way from the production rows to the west boundary.
+fn return_outputs(
+    request: &FactoryRequest,
+    rows: &mut [ProductionRow],
+    doc: &mut BlueprintDocument,
+    bus: &InputBus,
+) -> Result<()> {
+    let west = bus.lines[0].source.position.x.floor() as i32;
+    let occupied: HashSet<_> = doc
+        .blueprint
+        .entities
+        .iter()
+        .map(|e| (e.position.x.floor() as i32, e.position.y.floor() as i32))
+        .collect();
+    for port in outputs(rows) {
+        let y = port.position.y.floor() as i32;
+        let mut x = port.position.x.floor() as i32 - 1;
+        let mut last = port.entity_number;
+        while x >= west {
+            if occupied.contains(&(x - 1, y)) {
+                ensure!(x - 3 >= west, "Not enough room for an output crossing");
+                for (tx, kind) in [(x, "input"), (x - 3, "output")] {
+                    ensure!(
+                        !occupied.contains(&(tx, y)),
+                        "Output crossing overlaps an input"
+                    );
+                    last = doc.add(
+                        &bus.underground,
+                        f64::from(tx) + 0.5,
+                        f64::from(y) + 0.5,
+                        12,
+                    );
+                    doc.blueprint.entities[(last - 1) as usize].belt_type = Some(kind.into());
+                }
+                x -= 4;
+            } else {
+                ensure!(!occupied.contains(&(x, y)), "Output overlaps an input");
+                last = doc.add(&request.belt, f64::from(x) + 0.5, f64::from(y) + 0.5, 12);
+                x -= 1;
+            }
+        }
+        for row in rows
+            .iter_mut()
+            .filter(|r| r.output.entity_number == port.entity_number)
+        {
+            row.output.entity_number = last;
+            row.output.position = doc.blueprint.entities[(last - 1) as usize].position;
+        }
+    }
+    Ok(())
 }
 
 /// A balanced splitter tree above the rows, with isolated vertical leaf trunks.
@@ -288,12 +376,14 @@ fn place_storage(
         p.prototype.prototype_type == "container" && p.tile_width == 1 && p.tile_height == 1,
         "Output storage needs a 1x1 ordinary chest"
     );
+    let step = if request.reverse_output { -1 } else { 1 };
     let start_x = doc
         .blueprint
         .entities
         .iter()
         .filter(|e| e.name == request.belt)
         .map(|e| e.position.x.floor() as i32)
+        .map(|x| x * step)
         .max()
         .unwrap()
         + 3;
@@ -306,11 +396,11 @@ fn place_storage(
         let mut belts = Vec::new();
         let mut chests = Vec::new();
         let mut inserters = Vec::new();
-        for x in port.position.x.floor() as i32 + 1..start_x + n as i32 {
-            belts.push(doc.add(&request.belt, f64::from(x) + 0.5, y, 4));
+        for x in port.position.x.floor() as i32 * step + 1..start_x + n as i32 {
+            belts.push(doc.add(&request.belt, f64::from(x * step) + 0.5, y, port.direction));
         }
         for i in 0..n {
-            let x = f64::from(start_x + i as i32) + 0.5;
+            let x = f64::from((start_x + i as i32) * step) + 0.5;
             let side = if i % 2 == 0 { 1.0 } else { -1.0 };
             chests.push(doc.add(chest, x, y + 2.0 * side, 0));
             let arm = doc.add(

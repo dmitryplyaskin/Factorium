@@ -64,20 +64,68 @@ pub(super) fn validate(
             && e.position.y + b.right_bottom.y > f64::from(tile.1)
             && e.position.y + b.left_top.y < f64::from(tile.1 + 1))
     };
-    let walk = |start: u32, stop: Option<u32>| -> Result<Vec<u32>> {
+    let walk = |start: u32, stop: Option<u32>, direction: u8| -> Result<Vec<u32>> {
         let mut path = Vec::new();
+        let mut seen = BTreeSet::new();
         let mut current = start;
         loop {
             let e = *ids.get(&current).context("Unknown belt port")?;
-            ensure!(e.name == f.request.belt, "Port is not a belt");
-            ensure!(e.direction == 4, "Production belt must face east");
+            ensure!(seen.insert(current), "Production belt forms a cycle");
+            let underground = f.bus.as_ref().filter(|b| e.name == b.underground);
+            ensure!(
+                e.name == f.request.belt || underground.is_some(),
+                "Port is not a belt"
+            );
+            ensure!(
+                e.direction == direction,
+                "Production belt has wrong direction"
+            );
             path.push(current);
             if stop == Some(current) {
+                ensure!(
+                    e.name == f.request.belt,
+                    "Output port must be a surface belt"
+                );
                 break;
             }
-            let next = (e.position.x.floor() as i32 + 1, e.position.y.floor() as i32);
+            let step = if direction == 12 { -1 } else { 1 };
+            if underground.is_some() && e.belt_type.as_deref() == Some("input") {
+                let reach = entity(data, &e.name)?.prototype.properties["max_underground_distance"]
+                    .as_u64()
+                    .context("Missing underground reach")? as i32;
+                current = (1..=reach)
+                    .find_map(|n| {
+                        occupied
+                            .get(&(
+                                e.position.x.floor() as i32 + step * n,
+                                e.position.y.floor() as i32,
+                            ))
+                            .and_then(|id| ids.get(id))
+                            .filter(|other| {
+                                other.name == e.name
+                                    && other.direction == direction
+                                    && other.belt_type.as_deref() == Some("output")
+                            })
+                            .map(|other| other.entity_number)
+                    })
+                    .context("Disconnected output underground crossing")?;
+                continue;
+            }
+            ensure!(
+                underground.is_none() || e.belt_type.as_deref() == Some("output"),
+                "Invalid output underground belt type"
+            );
+            let next = (
+                e.position.x.floor() as i32 + step,
+                e.position.y.floor() as i32,
+            );
             match occupied.get(&next).and_then(|id| ids.get(id)) {
-                Some(e) if e.name == f.request.belt => current = e.entity_number,
+                Some(e)
+                    if e.name == f.request.belt
+                        || f.bus.as_ref().is_some_and(|b| e.name == b.underground) =>
+                {
+                    current = e.entity_number
+                }
                 _ => break,
             }
         }
@@ -98,11 +146,6 @@ pub(super) fn validate(
                 .max_machines_per_row
                 .is_none_or(|n| row.machines.len() <= n),
             "Row exceeds machine-count limit"
-        );
-        let width = (row.output.position.x - row.input.position.x + 1.0).round() as u32;
-        ensure!(
-            f.request.max_row_width.is_none_or(|n| width <= n),
-            "Row exceeds width limit in tiles"
         );
         ensure!(
             ports.len() == requirements.len(),
@@ -144,7 +187,13 @@ pub(super) fn validate(
                     .is_some_and(|e| e.position == port.position),
                 "Input port coordinates mismatch"
             );
-            let path = walk(port.entity_number, None)?;
+            let path = walk(port.entity_number, None, 4)?;
+            ensure!(
+                f.request
+                    .max_row_width
+                    .is_none_or(|n| path.len() <= n as usize),
+                "Row exceeds width limit in tiles"
+            );
             for &id in &path {
                 ensure!(
                     used_belts.insert(id),
@@ -155,14 +204,40 @@ pub(super) fn validate(
             input_rates[i] += port.rate;
         }
         let last = ids[&row.output.entity_number];
+        let direction = if f.request.reverse_output { 12 } else { 4 };
+        ensure!(
+            row.output.direction == direction && last.direction == direction,
+            "Output port direction does not match the requested side"
+        );
+        if f.request.reverse_output {
+            let boundary = f.external_inputs();
+            ensure!(
+                boundary
+                    .iter()
+                    .all(|p| p.direction == 4 && p.position.x == row.output.position.x),
+                "Reversed inputs and outputs must share the west boundary"
+            );
+        }
         let first = ids
             .values()
             .filter(|e| {
-                e.name == f.request.belt && e.direction == 4 && e.position.y == last.position.y
+                e.name == f.request.belt
+                    && e.direction == direction
+                    && e.position.y == last.position.y
             })
-            .min_by(|a, b| a.position.x.total_cmp(&b.position.x))
+            .min_by(|a, b| {
+                if direction == 12 {
+                    b.position.x.total_cmp(&a.position.x)
+                } else {
+                    a.position.x.total_cmp(&b.position.x)
+                }
+            })
             .context("Missing output line")?;
-        let output_line = walk(first.entity_number, Some(row.output.entity_number))?;
+        let output_line = walk(
+            first.entity_number,
+            Some(row.output.entity_number),
+            direction,
+        )?;
         ensure!(
             output_line.last() == Some(&row.output.entity_number),
             "Output port is not the end of its belt"
@@ -230,7 +305,12 @@ pub(super) fn validate(
                         "Output needs the primary inserter"
                     );
                     ensure!(
-                        row.output.lanes == if dy == 1 { "right" } else { "left" },
+                        row.output.lanes
+                            == if (dy == 1) != f.request.reverse_output {
+                                "right"
+                            } else {
+                                "left"
+                            },
                         "Output lane does not match the inserter's physical drop side"
                     );
                     ensure!(

@@ -47,6 +47,8 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub common_input: bool,
     #[serde(default)]
+    pub reverse_output: bool,
+    #[serde(default)]
     pub output_chest: Option<String>,
     #[serde(default)]
     pub input_markers: bool,
@@ -68,6 +70,7 @@ impl FactoryRequest {
             secondary_inserter: None,
             pole: "small-electric-pole".into(),
             common_input: false,
+            reverse_output: false,
             output_chest: None,
             input_markers: false,
             max_machines_per_row: None,
@@ -819,7 +822,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                 &data.game_version,
                 format!("Factorium: {} >= {}/s", request.product, request.rate),
             )?;
-            let rows = rows::Production {
+            let mut rows = rows::Production {
                 request,
                 machine,
                 recipe: &recipe.prototype.name,
@@ -834,7 +837,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
             let (bus, storage, markers) = infrastructure::place(
                 data,
                 request,
-                &rows,
+                &mut rows,
                 &mut doc,
                 infrastructure::Rates {
                     belt: belt_rate,
@@ -929,8 +932,11 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                     .collect::<std::collections::BTreeSet<_>>()
                     .len()
             );
-            if bus.is_some() {
+            if bus.is_some() && !request.reverse_output {
                 doc.blueprint.description.push_str(" Shared bus: connect separate ingredient belts from the north; splitters redistribute flow between rows.");
+            }
+            if request.reverse_output {
+                doc.blueprint.description.push_str(" Inputs and outputs are on the west side. Supply ingredients from the west; continue output belts to the west.");
             }
             if !storage.is_empty() {
                 doc.blueprint.description.push_str(

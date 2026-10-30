@@ -79,8 +79,8 @@ pub(super) fn validate(
                 .context("Missing bus inlet")?;
             ensure!(
                 source.name == f.request.belt
-                    && source.direction == 8
-                    && line.source.direction == 8
+                    && source.direction == if f.request.reverse_output { 4 } else { 8 }
+                    && line.source.direction == source.direction
                     && source.position == line.source.position
                     && line.source.lanes == "both",
                 "Wrong common input position/direction"
@@ -246,6 +246,7 @@ pub(super) fn validate(
             "Output chest inserters cannot handle requested throughput"
         );
         let mut last = port.position;
+        let step = if f.request.reverse_output { -1.0 } else { 1.0 };
         let bank_belts: HashSet<_> = bank.belts.iter().copied().collect();
         ensure!(
             bank_belts.len() == bank.belts.len(),
@@ -255,9 +256,9 @@ pub(super) fn validate(
             let e = ids.get(&id).context("Missing storage belt")?;
             ensure!(
                 e.name == f.request.belt
-                    && e.direction == 4
+                    && e.direction == port.direction
                     && e.position.y == last.y
-                    && e.position.x == last.x + 1.0,
+                    && e.position.x == last.x + step,
                 "Broken storage conveyor"
             );
             ensure!(used.belts.insert(id), "Storage belt overlaps another route");

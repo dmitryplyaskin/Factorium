@@ -171,13 +171,32 @@ fn optional_infrastructure_transports_items_and_stores_real_output() -> Result<(
     r.input_markers = true;
     r.max_row_width = Some(10);
     cases.push(r);
+    let reversed: Vec<_> = cases
+        .iter()
+        .cloned()
+        .map(|mut r| {
+            r.reverse_output = true;
+            r
+        })
+        .collect();
+    cases.extend(reversed);
     for r in cases {
         eprintln!(
-            "Options case: {} {}/s, bus={}, storage={:?}",
-            r.product, r.rate, r.common_input, r.output_chest
+            "Options case: {} {}/s, bus={}, reverse={}, storage={:?}",
+            r.product, r.rate, r.common_input, r.reverse_output, r.output_chest
         );
         let factory = generate_blueprint(&data, &r)?;
-        let report = verify_in_game(&data, &factory, &game, &SimulationOptions::default())?;
+        // Returning output across a large bus adds conveyor travel time before
+        // chest deliveries settle; measure the steady state after that delay.
+        let options = SimulationOptions {
+            warmup_ticks: if r.reverse_output && r.common_input {
+                360 * 60
+            } else {
+                120 * 60
+            },
+            ..SimulationOptions::default()
+        };
+        let report = verify_in_game(&data, &factory, &game, &options)?;
         eprintln!(
             "{} rows, {} external inputs, measured {:.3}/s",
             factory.rows.len(),

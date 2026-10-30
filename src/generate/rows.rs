@@ -62,11 +62,11 @@ impl Production<'_> {
         ids
     }
 
-    fn belt(&self, doc: &mut BlueprintDocument, y: f64, width: i32) -> (u32, u32) {
+    fn belt(&self, doc: &mut BlueprintDocument, y: f64, width: i32, direction: u8) -> (u32, u32) {
         let mut first = 0;
         let mut last = 0;
         for x in -2..=width + 1 {
-            last = doc.add(&self.request.belt, f64::from(x) + 0.5, y, 4);
+            last = doc.add(&self.request.belt, f64::from(x) + 0.5, y, direction);
             if x == -2 {
                 first = last;
             }
@@ -107,8 +107,13 @@ impl Production<'_> {
                 position: doc.blueprint.entities[(output - 1) as usize].position,
                 item: self.request.product.clone(),
                 rate,
-                lanes: lane.into(),
-                direction: 4,
+                lanes: if self.request.reverse_output {
+                    if lane == "left" { "right" } else { "left" }
+                } else {
+                    lane
+                }
+                .into(),
+                direction: if self.request.reverse_output { 12 } else { 4 },
             },
         }
     }
@@ -134,15 +139,25 @@ impl Production<'_> {
             let lower_y = y + h + 3;
             let lower_machines = self.machines(doc, lower, lower_y, gap, true);
             let inputs = (0..self.inputs.len())
-                .map(|i| self.belt(doc, f64::from(y) - 1.5 - i as f64, width).0)
+                .map(|i| self.belt(doc, f64::from(y) - 1.5 - i as f64, width, 4).0)
                 .collect();
-            let output = self.belt(doc, f64::from(y + h) + 1.5, width).1;
+            let output_line = self.belt(
+                doc,
+                f64::from(y + h) + 1.5,
+                width,
+                if self.request.reverse_output { 12 } else { 4 },
+            );
+            let output = if self.request.reverse_output {
+                output_line.0
+            } else {
+                output_line.1
+            };
             rows.push(self.row(doc, upper_machines, inputs, output, "right"));
             if lower > 0 {
                 let lower_width = lower as i32 * (w + gap) - gap;
                 let inputs = (0..self.inputs.len())
                     .map(|i| {
-                        self.belt(doc, f64::from(lower_y + h) + 1.5 + i as f64, lower_width)
+                        self.belt(doc, f64::from(lower_y + h) + 1.5 + i as f64, lower_width, 4)
                             .0
                     })
                     .collect();

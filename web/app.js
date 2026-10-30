@@ -25,10 +25,10 @@ async function api(path,options={}) {
 
 function request() {
   const recipe=state.catalog?.recipes.find(r=>r.name===$('recipe-select').value);
-  return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,secondary_inserter:recipeIngredients(recipe).length===2?$('secondary-inserter').value:null,pole:$('pole').value,common_input:$('common-input').checked,output_chest:$('store-output').checked?$('output-chest').value:null,input_markers:$('input-markers').checked,max_machines_per_row:$('limit-machines').checked && $('max-machines').value?Number($('max-machines').value):null,max_row_width:$('limit-row-width').checked && $('max-row-width').value?Number($('max-row-width').value):null};
+  return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,secondary_inserter:recipeIngredients(recipe).length===2?$('secondary-inserter').value:null,pole:$('pole').value,common_input:$('common-input').checked,reverse_output:$('reverse-output').checked,output_chest:$('store-output').checked?$('output-chest').value:null,input_markers:$('input-markers').checked,max_machines_per_row:$('limit-machines').checked && $('max-machines').value?Number($('max-machines').value):null,max_row_width:$('limit-row-width').checked && $('max-row-width').value?Number($('max-row-width').value):null};
 }
 function restoreOptions(r={}) {
-  $('common-input').checked=Boolean(r.common_input);$('input-markers').checked=Boolean(r.input_markers);
+  $('common-input').checked=Boolean(r.common_input);$('input-markers').checked=Boolean(r.input_markers);$('reverse-output').checked=Boolean(r.reverse_output);
   $('store-output').checked=Boolean(r.output_chest);if(r.output_chest)$('output-chest').value=r.output_chest;
   $('limit-machines').checked=Boolean(r.max_machines_per_row);$('max-machines').value=r.max_machines_per_row || 8;$('limit-row-width').checked=Boolean(r.max_row_width);$('max-row-width').value=r.max_row_width || 20;optionsChanged();
 }
@@ -189,12 +189,13 @@ function drawFactory(f) {
     bodyGroup.append(group);
   }
   for(const [a,,b] of f.document.blueprint.wires){const p=byID.get(a).position,q=byID.get(b).position;wireGroup.append(svg('path',{d:`M ${p.x} ${p.y} Q ${(p.x+q.x)/2} ${(p.y+q.y)/2+.3} ${q.x} ${q.y}`,fill:'none',stroke:'#dbb96d','stroke-opacity':.75,'stroke-width':.045}));}
-  for(const [ports,isOutput] of [[inputPorts(f),false],[f.storage?.length ? f.storage.map(b=>({...byID.get(b.chests[0]),storage:true})) : outputPorts(f),true]]) {
+  for(const [ports,isOutput] of [[inputPorts(f),false],[f.storage?.length ? f.storage.map(b=>({...byID.get(b.chests[0]),storage:true,direction:f.request.reverse_output?12:4})) : outputPorts(f),true]]) {
     ports.forEach((port,i)=>{
       const x=port.position.x,y=port.position.y,color=isOutput?'#edbd65':'#85d9ba';
       const north=port.direction===8;
-      portsGroup.append(svg('path',{d:north?`M ${x} ${y-2.2} v 1.7 m -.3 -.5 l .3 .5 .3 -.5`:isOutput?`M ${x+.5} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`:`M ${x-2.2} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`,fill:'none',stroke:color,'stroke-width':.09}));
-      portsGroup.append(svg('text',{x:north?x:isOutput?x+2.5:x-2.5,y:north?y-2.7:y+.16,'text-anchor':north?'middle':isOutput?'start':'end',fill:color,'font-size':.52,'font-family':'Segoe UI, sans-serif'},`${port.storage?'Склад':isOutput?'Выход':'Вход'} ${i+1}`));
+      const west=isOutput && port.direction===12;
+      portsGroup.append(svg('path',{d:north?`M ${x} ${y-2.2} v 1.7 m -.3 -.5 l .3 .5 .3 -.5`:west?`M ${x-.5} ${y} h -1.7 m .5 -.3 l -.5 .3 .5 .3`:isOutput?`M ${x+.5} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`:`M ${x-2.2} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`,fill:'none',stroke:color,'stroke-width':.09}));
+      portsGroup.append(svg('text',{x:north?x:isOutput&&!west?x+2.5:x-2.5,y:north?y-2.7:y+.16,'text-anchor':north?'middle':isOutput&&!west?'start':'end',fill:color,'font-size':.52,'font-family':'Segoe UI, sans-serif'},`${port.storage?'Склад':isOutput?'Выход':'Вход'} ${i+1}`));
     });
   }
   for(const marker of f.markers || []) {
@@ -249,10 +250,11 @@ function renderPorts(f) {
     const itemCell=element('td','',item);if(hint)itemCell.append(element('span','port-hint',hint));
     const rateCell=element('td','',rate),pointCell=element('td'),button=element('button','coordinate-button',`${number(position.x)}; ${number(position.y)}`);button.type='button';button.setAttribute('aria-label',`Показать на схеме: ${name}`);button.addEventListener('click',()=>focusPoint(position.x,position.y));pointCell.append(button);tr.append(nameCell,itemCell,rateCell,pointCell);body.append(tr);
   };
-  inputs.forEach((port,i)=>add(`Вход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',f.bus?`Шина с севера · рядов: ${port.targets.length} · обе полосы`:`Ряд ${port.row_index} · ${port.ingredient_index===1?'дальняя':'ближняя'} лента · обе полосы`));
+  inputs.forEach((port,i)=>add(`Вход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',f.bus?`Шина ${f.request.reverse_output?'с запада':'с севера'} · рядов: ${port.targets.length} · обе полосы`:`Ряд ${port.row_index} · ${port.ingredient_index===1?'дальняя':'ближняя'} лента · обе полосы`));
   outputs.forEach((port,i)=>{
     const bank=f.storage?.find(b=>b.output_entity===port.entity_number),chest=bank && f.document.blueprint.entities.find(e=>e.entity_number===bank.chests[0]);
-    add(bank?`Склад ${i+1}`:`Выход ${i+1}`,label(port.item),`${number(port.rate)} /с`,chest?.position || port.position,'output',bank?`${bank.chests.length} × ${label(f.request.output_chest)} · до заполнения` : port.lanes==='both'?`Левая ${number(port.left_rate)}/с · правая ${number(port.right_rate)}/с`:`${port.lanes==='left'?'Левая':'Правая'} полоса · продолжение на восток`);
+    const lanes=port.lanes==='both'?`Левая ${number(port.left_rate)}/с · правая ${number(port.right_rate)}/с`:`${port.lanes==='left'?'Левая':'Правая'} полоса`;
+    add(bank?`Склад ${i+1}`:`Выход ${i+1}`,label(port.item),`${number(port.rate)} /с`,chest?.position || port.position,'output',bank?`${bank.chests.length} × ${label(f.request.output_chest)} · до заполнения` : `${lanes} · продолжение ${port.direction===12?'на запад':'на восток'}`);
   });
   add('Питание',`Столб #${f.power.connection_entity}`,`до ${power(f.power.installed_power_watts)}`,f.power.connection_position,'power','Подключите к внешней электросети');
 }

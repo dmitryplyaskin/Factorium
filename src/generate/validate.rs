@@ -53,7 +53,9 @@ pub fn validate_factory(data: &GameData, f: &GeneratedFactory) -> Result<()> {
             machines.insert(e.entity_number);
         } else if e.name == f.request.belt {
             ensure!(
-                e.direction == 4 || (f.request.common_input && matches!(e.direction, 0 | 8 | 12)),
+                e.direction == 4
+                    || ((f.request.common_input || f.request.reverse_output)
+                        && matches!(e.direction, 0 | 8 | 12)),
                 "Belt has unsupported direction"
             );
             belts.insert(e.entity_number);

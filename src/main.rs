@@ -54,6 +54,9 @@ enum Commands {
         /// Route one or more shared inlet belts to the production rows.
         #[arg(long)]
         common_input: bool,
+        /// Place output belts and storage on the same side as ingredient inlets.
+        #[arg(long)]
+        reverse_output: bool,
         /// Collect output in ordinary chests (default: steel-chest).
         #[arg(long,num_args=0..=1,default_missing_value="steel-chest")]
         output_chest: Option<String>,
@@ -236,6 +239,7 @@ fn main() -> Result<()> {
             inserter,
             secondary_inserter,
             common_input,
+            reverse_output,
             output_chest,
             input_markers,
             max_machines_per_row,
@@ -257,6 +261,7 @@ fn main() -> Result<()> {
                 inserter,
                 secondary_inserter,
                 common_input,
+                reverse_output,
                 output_chest,
                 input_markers,
                 max_machines_per_row,

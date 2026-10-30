@@ -7,6 +7,76 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use factorium::{FactoryRequest, generate_blueprint, validate_factory};
 
 #[test]
+fn reverse_output_keeps_ports_and_storage_on_the_input_side() -> Result<()> {
+    let data = common::catalog();
+    for product in ["iron-gear-wheel", "electronic-circuit"] {
+        for common_input in [false, true] {
+            for storage in [false, true] {
+                let mut r = FactoryRequest::new(
+                    product,
+                    if product == "electronic-circuit" {
+                        1.0
+                    } else {
+                        5.0
+                    },
+                );
+                r.reverse_output = true;
+                r.common_input = common_input;
+                r.output_chest = storage.then(|| "steel-chest".into());
+                r.input_markers = true;
+                r.max_machines_per_row = Some(3);
+                r.max_row_width = Some(14);
+                r.pole = "substation".into();
+                let f = generate_blueprint(&data, &r)?;
+                validate_factory(&data, &f)?;
+                let boundary = f.external_inputs();
+                assert!(boundary.iter().all(|p| p.direction == 4));
+                for port in f.output_ports() {
+                    assert_eq!(port.direction, 12);
+                    assert!(boundary.iter().all(|p| p.position.x == port.position.x));
+                    assert!(
+                        f.storage
+                            .iter()
+                            .filter(|b| b.output_entity == port.entity_number)
+                            .flat_map(|b| &b.chests)
+                            .all(
+                                |&id| f.document.blueprint.entities[(id - 1) as usize].position.x
+                                    < port.position.x
+                            )
+                    );
+                }
+                let mut bad = f.clone();
+                let id = bad.rows[0].output.entity_number;
+                bad.document.blueprint.entities[(id - 1) as usize].direction = 4;
+                assert!(validate_factory(&data, &bad).is_err());
+                let mut bad = f.clone();
+                bad.rows[0].output.lanes = if bad.rows[0].output.lanes == "left" {
+                    "right".into()
+                } else {
+                    "left".into()
+                };
+                assert!(validate_factory(&data, &bad).is_err());
+                if common_input {
+                    let mut bad = f.clone();
+                    let crossing = bad
+                        .document
+                        .blueprint
+                        .entities
+                        .iter_mut()
+                        .find(|e| e.direction == 12 && e.belt_type.as_deref() == Some("output"))
+                        .expect("reversed outputs cross the bus underground");
+                    crossing.belt_type = Some("input".into());
+                    assert!(validate_factory(&data, &bad).is_err());
+                }
+                let restored = serde_json::from_value(serde_json::to_value(&f)?)?;
+                validate_factory(&data, &restored)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn optional_bus_storage_markers_and_both_row_limits_are_validated() -> Result<()> {
     let data = common::catalog();
     let mut r = FactoryRequest::new("electronic-circuit", 1.0);
@@ -126,6 +196,7 @@ fn old_requests_default_to_direct_ports_without_optional_infrastructure() -> Res
     let mut json = serde_json::to_value(FactoryRequest::new("iron-gear-wheel", 1.0))?;
     for key in [
         "common_input",
+        "reverse_output",
         "output_chest",
         "input_markers",
         "max_machines_per_row",
@@ -134,6 +205,7 @@ fn old_requests_default_to_direct_ports_without_optional_infrastructure() -> Res
         json.as_object_mut().unwrap().remove(key);
     }
     let request: FactoryRequest = serde_json::from_value(json)?;
+    assert!(!request.reverse_output);
     let f = generate_blueprint(&common::catalog(), &request)?;
     assert!(f.bus.is_none() && f.storage.is_empty() && f.markers.is_empty());
     Ok(())
