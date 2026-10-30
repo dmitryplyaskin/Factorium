@@ -1,13 +1,14 @@
 -- cfg is injected as JSON, not interpolated executable source.
 local f, opts = cfg.factory, cfg.options
-local real, rows, surface, start_tick
+local ingredients = cfg.inputs
+local real, rows, outputs, surface, start_tick
 local inserted, delivered = 0, 0
 local windows, window_count = {}, 0
 local report = {
   passed = false, game_version = script.active_mods.base, mods = {},
   entity_count = 0, pole_count = 0, network_count = 0, unpowered_entities = {},
   measured_output_per_second = 0, window_rates = {}, delivered_items = 0,
-  inserted_items = 0, warmup_ticks = opts.warmup_ticks,
+  inserted_items = 0, input_deliveries = {}, row_outputs = {}, warmup_ticks = opts.warmup_ticks,
   measurement_ticks = opts.measurement_ticks, machine_status_counts = {}, errors = {}
 }
 for name, version in pairs(script.active_mods) do report.mods[name] = version end
@@ -72,15 +73,21 @@ script.on_init(function()
   end
   local machine = real[f.rows[1].machines[1]]
   local recipe = prototypes.recipe[f.recipe]
-  if #recipe.ingredients ~= 1 or #recipe.products ~= 1 or recipe.ingredients[1].name ~= f.input_item or recipe.products[1].name ~= f.request.product then
+  if #recipe.ingredients ~= #ingredients or #recipe.products ~= 1 or recipe.products[1].name ~= f.request.product then
     fail("Recipe ingredients/products differ from the catalog")
   else
     local output = recipe.get_product_amount(1, machine.productivity_bonus)
-    local expected_ratio = f.input_per_second / f.request.rate
-    if math.abs(recipe.ingredients[1].amount / output - expected_ratio) > 1e-8 then fail("Recipe amounts/productivity differ from the catalog") end
+    local amounts = {}
+    for _, ingredient in ipairs(recipe.ingredients) do amounts[ingredient.name] = ingredient.amount end
+    for _, input in ipairs(ingredients) do
+      if not amounts[input.item] or math.abs(amounts[input.item] / output - input.per_second / f.request.rate) > 1e-8 then fail("Recipe amounts/productivity differ from the catalog: " .. input.item) end
+    end
     if math.abs(machine.crafting_speed / recipe.energy - f.machine_crafts_per_second) > 1e-8 then fail("Crafting speed differs from the catalog") end
   end
-  if prototypes.item[f.input_item].get_spoil_ticks("normal") > 0 or prototypes.item[f.request.product].get_spoil_ticks("normal") > 0 then fail("Items spoil in this game profile") end
+  for _, input in ipairs(ingredients) do
+    if prototypes.item[input.item].get_spoil_ticks("normal") > 0 then fail("Ingredient spoils in this game profile: " .. input.item) end
+  end
+  if prototypes.item[f.request.product].get_spoil_ticks("normal") > 0 then fail("Product spoils in this game profile") end
   if math.abs(prototypes.entity[f.request.belt].belt_speed * 480 - f.belt_items_per_second) > 1e-8 then fail("Belt speed differs from the catalog") end
   local pole_proto = prototypes.entity[f.request.pole]
   if math.abs(pole_proto.get_supply_area_distance("normal") - f.power.supply_area_distance) > 1e-8 or math.abs(pole_proto.get_max_wire_distance("normal") - f.power.max_wire_distance) > 1e-8 then fail("Pole supply area or wire reach differs from the catalog") end
@@ -141,8 +148,34 @@ script.on_init(function()
   generator.power_production = 1e12
   generator.energy = 1e12
   rows = {}
-  for _, row in ipairs(f.rows) do
-    table.insert(rows, {input = real[row.input.entity_number], output = real[row.output.entity_number], rate = row.input.rate, credit = 0, lane = 1})
+  outputs = {}
+  local by_output = {}
+  for i, row in ipairs(f.rows) do
+    local lane = row.output.lanes == "left" and defines.transport_line.left_line or defines.transport_line.right_line
+    local measured = {
+      row_index = i, output_entity = row.output.entity_number, lane = row.output.lanes,
+      target_per_second = row.output.rate / 1.05, measured_per_second = 0,
+      delivered_items = 0, window_rates = {}
+    }
+    table.insert(report.row_outputs, measured)
+    local state = {inputs = {}, measured = measured, window_count = 0}
+    local ports = {row.input}
+    for _, port in ipairs(row.additional_inputs or {}) do table.insert(ports, port) end
+    for _, port in ipairs(ports) do
+      local delivered_input = {row_index = i, input_entity = port.entity_number, item = port.item,
+        supplied_per_second = port.rate, measured_per_second = 0, inserted_items = 0}
+      table.insert(report.input_deliveries, delivered_input)
+      table.insert(state.inputs, {entity = real[port.entity_number], item = port.item, rate = port.rate,
+        credit = 0, lane = 1, measured = delivered_input})
+    end
+    table.insert(rows, state)
+    local port = by_output[row.output.entity_number]
+    if not port then
+      port = {entity = real[row.output.entity_number], rows = {}, unexpected = 0}
+      by_output[row.output.entity_number] = port
+      table.insert(outputs, port)
+    end
+    port.rows[lane] = state
   end
   start_tick = game.tick
 end)
@@ -159,22 +192,42 @@ script.on_event(defines.events.on_tick, function()
     if #report.unpowered_entities > 0 then fail("Some consumers have no connection to the external electricity supply") end
   end
   for _, row in ipairs(rows) do
-    row.credit = math.min(row.credit + row.rate / 60, row.rate + 2)
-    while row.credit >= 1 do
-      local line = row.input.get_transport_line(row.lane)
-      if not line.insert_at_back({name = f.input_item, count = 1}) then break end
-      row.lane = 3 - row.lane
-      row.credit = row.credit - 1
+    for _, input in ipairs(row.inputs) do
+    input.credit = math.min(input.credit + input.rate / 60, input.rate + 2)
+    while input.credit >= 1 do
+      local line = input.entity.get_transport_line(input.lane)
+      if not line.insert_at_back({name = input.item, count = 1}) then break end
+      input.lane = 3 - input.lane
+      input.credit = input.credit - 1
       inserted = inserted + 1
+      if tick > opts.warmup_ticks then input.measured.inserted_items = input.measured.inserted_items + 1 end
     end
+    end
+  end
+  -- Read each physical output once. Shared-belt lanes belong to different rows;
+  -- total throughput alone must never conceal a stalled half of a pair.
+  for _, port in ipairs(outputs) do
     for lane = 1, 2 do
-      local line = row.output.get_transport_line(lane)
+      local line = port.entity.get_transport_line(lane)
       local count = line.remove_item({name = f.request.product, count = 100000})
-      if tick > opts.warmup_ticks then delivered = delivered + count; window_count = window_count + count end
+      if tick > opts.warmup_ticks then
+        delivered = delivered + count; window_count = window_count + count
+        local row = port.rows[lane]
+        if row then
+          row.measured.delivered_items = row.measured.delivered_items + count
+          row.window_count = row.window_count + count
+        else
+          port.unexpected = port.unexpected + count
+        end
+      end
     end
   end
   if tick > opts.warmup_ticks and (tick-opts.warmup_ticks) % (opts.measurement_ticks/4) == 0 then
     table.insert(windows, window_count * 60 / (opts.measurement_ticks/4)); window_count = 0
+    for _, row in ipairs(rows) do
+      table.insert(row.measured.window_rates, row.window_count * 60 / (opts.measurement_ticks/4))
+      row.window_count = 0
+    end
   end
   if tick >= opts.warmup_ticks + opts.measurement_ticks then
     report.delivered_items = delivered
@@ -182,6 +235,24 @@ script.on_event(defines.events.on_tick, function()
     report.window_rates = windows
     if delivered < 20 then fail("Too few delivered items for verification; increase measurement duration") end
     if report.measured_output_per_second + 1e-8 < f.request.rate then fail("Measured boundary output is below the requested rate") end
+    for _, input in ipairs(report.input_deliveries) do
+      input.measured_per_second = input.inserted_items * 60 / opts.measurement_ticks
+      if input.inserted_items == 0 or input.measured_per_second + 60 / opts.measurement_ticks + 1e-8 < input.supplied_per_second / 1.05 then
+        fail("Ingredient " .. input.item .. " at row " .. input.row_index .. " received less than its requested share")
+      end
+    end
+    for _, row in ipairs(rows) do
+      local result = row.measured
+      result.measured_per_second = result.delivered_items * 60 / opts.measurement_ticks
+      -- One item of measurement quantization is allowed, but every row must
+      -- actually deliver something, including a short final row of an odd pair.
+      if result.delivered_items == 0 or result.measured_per_second + 60 / opts.measurement_ticks + 1e-8 < result.target_per_second then
+        fail("Row " .. result.row_index .. " (" .. result.lane .. " lane) is below its requested share; increase measurement duration if necessary")
+      end
+    end
+    for _, port in ipairs(outputs) do
+      if port.unexpected > 0 then fail("Output arrived on an unassigned belt lane") end
+    end
     local smallest, largest = math.huge, 0
     for _, rate in ipairs(windows) do smallest = math.min(smallest, rate); largest = math.max(largest, rate) end
     if largest - smallest > math.max(0.1 * report.measured_output_per_second, 120 / (opts.measurement_ticks/4)) then

@@ -1,6 +1,9 @@
 //! Single-recipe solid production lines. Layout and power use game prototypes.
 
+mod layout;
 mod power;
+mod rows;
+mod transport;
 mod validate;
 
 use std::{
@@ -29,6 +32,8 @@ pub struct FactoryRequest {
     pub machine: String,
     pub belt: String,
     pub inserter: String,
+    #[serde(default)]
+    pub secondary_inserter: Option<String>,
     pub pole: String,
 }
 
@@ -41,6 +46,7 @@ impl FactoryRequest {
             machine: "assembling-machine-2".into(),
             belt: "transport-belt".into(),
             inserter: "fast-inserter".into(),
+            secondary_inserter: None,
             pole: "small-electric-pole".into(),
         }
     }
@@ -59,7 +65,24 @@ pub struct BeltPort {
 pub struct ProductionRow {
     pub machines: Vec<u32>,
     pub input: BeltPort,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_inputs: Vec<BeltPort>,
     pub output: BeltPort,
+}
+
+impl ProductionRow {
+    pub fn input_ports(&self) -> impl Iterator<Item = &BeltPort> {
+        std::iter::once(&self.input).chain(&self.additional_inputs)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputRequirement {
+    pub item: String,
+    pub per_second: f64,
+    pub supplied_per_second: f64,
+    pub inserter: String,
+    pub inserter_items_per_second: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +105,10 @@ pub struct GeneratedFactory {
     pub mods: BTreeMap<String, String>,
     pub request: FactoryRequest,
     pub recipe: String,
+    /// Compatibility alias for the first ingredient; see input_requirements().
     pub input_item: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<InputRequirement>,
     pub machine_count: usize,
     pub input_per_second: f64,
     /// Includes 5% operating headroom; this is the supply used in the game test.
@@ -98,6 +124,44 @@ pub struct GeneratedFactory {
 }
 
 impl GeneratedFactory {
+    /// Includes a compatibility view for previously saved single-input projects.
+    pub fn input_requirements(&self) -> Vec<InputRequirement> {
+        if !self.inputs.is_empty() {
+            return self.inputs.clone();
+        }
+        vec![InputRequirement {
+            item: self.input_item.clone(),
+            per_second: self.input_per_second,
+            supplied_per_second: self.supplied_input_per_second,
+            inserter: self.request.inserter.clone(),
+            inserter_items_per_second: self.inserter_items_per_second,
+        }]
+    }
+
+    pub fn input_ports(&self) -> impl Iterator<Item = &BeltPort> {
+        self.rows.iter().flat_map(ProductionRow::input_ports)
+    }
+
+    /// Physical output ports, with row contributions combined on shared belts.
+    /// Each row's output still records its own rate and assigned lane.
+    pub fn output_ports(&self) -> Vec<BeltPort> {
+        let mut ports: Vec<BeltPort> = Vec::new();
+        for row in &self.rows {
+            if let Some(port) = ports
+                .iter_mut()
+                .find(|p| p.entity_number == row.output.entity_number)
+            {
+                port.rate += row.output.rate;
+                if port.lanes != row.output.lanes {
+                    port.lanes = "both".into();
+                }
+            } else {
+                ports.push(row.output.clone());
+            }
+        }
+        ports
+    }
+
     pub fn write_to(&self, directory: &Path) -> Result<()> {
         fs::create_dir_all(directory)?;
         let old_report = directory.join("verification.json");
@@ -232,35 +296,61 @@ fn stable_item(data: &GameData, name: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) struct RecipeFlow {
+    pub ingredients: Vec<(String, f64)>,
+    pub output: f64,
+}
+
+pub(crate) fn inserter_reach(e: &Entity, reach: u32) -> bool {
+    let props = &e.prototype.properties;
+    let Some(pickup) = props.get("inserter_pickup_position") else {
+        return false;
+    };
+    let Some(drop) = props.get("inserter_drop_position") else {
+        return false;
+    };
+    e.prototype.prototype_type == "inserter"
+        && e.tile_width == 1
+        && e.tile_height == 1
+        && props.contains_key("electric_energy_source")
+        && pickup[0].as_f64() == Some(0.0)
+        && pickup[1].as_f64() == Some(-f64::from(reach))
+        && drop[0].as_f64() == Some(0.0)
+        && drop[1]
+            .as_f64()
+            .is_some_and(|v| (f64::from(reach)..f64::from(reach) + 0.5).contains(&v))
+}
+
 pub(crate) fn supported_recipe(
     data: &GameData,
     r: &Recipe,
     machine: &Entity,
-) -> Result<(String, f64, f64)> {
+) -> Result<RecipeFlow> {
     ensure!(
         !r.prototype.hidden,
         "Hidden recipe {} is not selectable",
         r.prototype.name
     );
     ensure!(
-        r.ingredients.len() == 1 && r.products.len() == 1,
-        "Recipe {} must have exactly one ingredient and one product",
+        (1..=2).contains(&r.ingredients.len()) && r.products.len() == 1,
+        "Recipe {} must have one or two ingredients and exactly one product",
         r.prototype.name
     );
-    let a = &r.ingredients[0];
     let b = &r.products[0];
     ensure!(
-        a.kind == "item" && b.kind == "item",
+        r.ingredients.iter().all(|a| a.kind == "item") && b.kind == "item",
         "Recipe {} uses fluids or non-item products",
         r.prototype.name
     );
     ensure!(
-        a.name != b.name,
+        r.ingredients.iter().all(|a| a.name != b.name),
         "Self-returning recipe {} is not supported",
         r.prototype.name
     );
     ensure!(
-        a.amount.is_finite() && a.amount > 0.0,
+        r.ingredients
+            .iter()
+            .all(|a| a.amount.is_finite() && a.amount > 0.0),
         "Invalid ingredient amount"
     );
     ensure!(
@@ -291,7 +381,23 @@ pub(crate) fn supported_recipe(
             "Product mechanic {key} is not supported"
         );
     }
-    stable_item(data, &a.name)?;
+    for a in &r.ingredients {
+        stable_item(data, &a.name)?;
+    }
+    if r.ingredients.len() == 2 {
+        ensure!(
+            r.ingredients[0].name != r.ingredients[1].name,
+            "Ingredients must have distinct item types"
+        );
+        ensure!(
+            machine.tile_width >= 2 && machine.tile_height >= 2,
+            "Two-input template needs a machine at least 2x2 tiles"
+        );
+        ensure!(
+            data.entities.values().any(|e| inserter_reach(e, 2)),
+            "Two-input template needs an electric two-tile-reach inserter"
+        );
+    }
     stable_item(data, &b.name)?;
     ensure!(
         r.categories
@@ -372,11 +478,14 @@ pub(crate) fn supported_recipe(
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0)
         .clamp(0.0, amount);
-    Ok((
-        a.name.clone(),
-        a.amount,
-        amount + (amount - ignored) * productivity,
-    ))
+    Ok(RecipeFlow {
+        ingredients: r
+            .ingredients
+            .iter()
+            .map(|a| (a.name.clone(), a.amount))
+            .collect(),
+        output: amount + (amount - ignored) * productivity,
+    })
 }
 
 /// Generate a candidate and independently check its geometry, wiring and row topology.
@@ -464,7 +573,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
         match candidates.as_slice() {
             [only] => *only,
             [] => bail!(
-                "No supported one-input/one-output recipe for {} on {}; specify --recipe for detailed diagnostics",
+                "No supported one/two-input recipe for {} on {}; specify --recipe for detailed diagnostics",
                 request.product,
                 request.machine
             ),
@@ -474,7 +583,27 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
             ),
         }
     };
-    let (input_item, a, b) = supported_recipe(data, recipe, machine)?;
+    let flow = supported_recipe(data, recipe, machine)?;
+    let (input_item, a) = &flow.ingredients[0];
+    let b = flow.output;
+    let secondary = if flow.ingredients.len() == 2 {
+        let selected = if let Some(name) = &request.secondary_inserter {
+            entity(data, name)?
+        } else {
+            data.entities
+                .get("long-handed-inserter")
+                .filter(|e| inserter_reach(e, 2))
+                .or_else(|| data.entities.values().find(|e| inserter_reach(e, 2)))
+                .context("No electric long-handed inserter available")?
+        };
+        ensure!(
+            inserter_reach(selected, 2),
+            "Select an electric two-tile-reach secondary inserter"
+        );
+        Some(selected)
+    } else {
+        None
+    };
     ensure!(
         recipe.products[0].name == request.product,
         "Selected recipe does not produce {}",
@@ -510,10 +639,40 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
         vec![0, machine.tile_width - 1]
     };
     let transfer = arm_rate * arm_columns.len() as f64;
-    let cell_rate = (crafts * b).min(transfer * b / a).min(transfer);
+    let secondary_rate = if let Some(e) = secondary {
+        let r = stat(e, "inserter_rotation_speed")?;
+        let x = stat(e, "inserter_extension_speed")?;
+        ensure!(
+            r > 0.0 && x > 0.0,
+            "Secondary inserter speeds must be positive"
+        );
+        0.8 * 60.0
+            / (2.0 * (0.5 / r).ceil()
+                + 2.0 * (2.0 / x).ceil()
+                + 2.0 * (1.0 / (4.0 * belt_speed)).ceil()
+                + 4.0)
+    } else {
+        0.0
+    };
+    let mut cell_rate = (crafts * b).min(transfer);
+    for (i, (_, amount)) in flow.ingredients.iter().enumerate() {
+        let input_transfer = if i == 1 {
+            secondary_rate
+        } else if secondary.is_some() {
+            arm_rate
+        } else {
+            transfer
+        };
+        cell_rate = cell_rate.min(input_transfer * b / amount);
+    }
     let belt_rate = belt_speed * 480.0;
-    let row_cap = (belt_rate * 0.85 * b / a).min(belt_rate * 0.5 * 0.85);
-    let per_row = ((row_cap / cell_rate).floor() as usize).clamp(1, 8);
+    let row_cap = flow
+        .ingredients
+        .iter()
+        .fold(belt_rate * 0.5 * 0.85, |cap, (_, amount)| {
+            cap.min(belt_rate * 0.85 * b / amount)
+        });
+    let legacy_per_row = ((row_cap / cell_rate).floor() as usize).clamp(1, 8);
     let cell_rate = cell_rate.min(row_cap);
     let planned = request.rate * 1.05;
     ensure!(planned.is_finite(), "Output rate is too large");
@@ -523,132 +682,129 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
         "Request exceeds prototype budget (1024 machines); reduce the rate or choose faster equipment"
     );
     let count = count as usize;
-    let mut doc = BlueprintDocument::new(
-        &data.game_version,
-        format!("Factorium: {} >= {}/s", request.product, request.rate),
-    )?;
-    let mut rows = Vec::new();
-    let mut remaining = count;
-    let mut remaining_rate = planned;
-    let gap = pole.tile_width as i32 + 2;
-    let w = machine.tile_width as i32;
-    let h = machine.tile_height as i32;
-    while remaining > 0 {
-        let n = remaining.min(per_row);
-        let y = rows.len() as i32 * (h + pole.tile_height as i32 + 8);
-        let width = n as i32 * (w + gap) - gap;
-        let row_rate = remaining_rate.min(n as f64 * cell_rate);
-        let mut ids = Vec::new();
-        for i in 0..n {
-            let x = i as i32 * (w + gap);
-            let id = doc.add(
-                &request.machine,
-                f64::from(x) + f64::from(w) / 2.0,
-                f64::from(y) + f64::from(h) / 2.0,
-                0,
+    // Row limits follow the supplied flow per machine. The final machine need
+    // not run at full modelled speed: rounding its count up must not force an
+    // unnecessary extra output belt when two lanes can carry the whole target.
+    let max_per_row = ((row_cap / (planned / count as f64)).floor() as usize).clamp(1, 64);
+    layout::optimize(
+        layout::Dimensions {
+            count,
+            max_per_row,
+            legacy_per_row,
+            input_belts: flow.ingredients.len() as u32,
+            machine: [machine.tile_width, machine.tile_height],
+            pole: [pole.tile_width, pole.tile_height],
+        },
+        |spec| {
+            let mut doc = BlueprintDocument::new(
+                &data.game_version,
+                format!("Factorium: {} >= {}/s", request.product, request.rate),
+            )?;
+            let rows = rows::Production {
+                request,
+                machine,
+                recipe: &recipe.prototype.name,
+                inputs: &flow.ingredients,
+                output_amount: b,
+                secondary,
+                arm_columns: &arm_columns,
+                count,
+                planned,
+            }
+            .place(&mut doc, spec);
+            ensure!(
+                doc.blueprint.entities.len() <= 50000,
+                "Layout exceeds prototype entity budget"
             );
-            if machine.prototype.prototype_type == "assembling-machine" {
-                doc.blueprint.entities[(id - 1) as usize].recipe =
-                    Some(recipe.prototype.name.clone());
-            }
-            ids.push(id);
-            for column in &arm_columns {
-                for arm_y in [y - 1, y + h] {
-                    let id = doc.add(
-                        &request.inserter,
-                        f64::from(x + *column as i32) + 0.5,
-                        f64::from(arm_y) + 0.5,
-                        0,
-                    );
-                    doc.blueprint.entities[(id - 1) as usize].override_stack_size = Some(1);
-                }
-            }
-        }
-        let mut in_id = 0;
-        let mut out_id = 0;
-        for x in -2..=width + 1 {
-            let id = doc.add(&request.belt, f64::from(x) + 0.5, f64::from(y) - 1.5, 4);
-            if x == -2 {
-                in_id = id;
-            }
-            let id = doc.add(&request.belt, f64::from(x) + 0.5, f64::from(y + h) + 1.5, 4);
-            if x == width + 1 {
-                out_id = id;
-            }
-        }
-        rows.push(ProductionRow {
-            machines: ids,
-            input: BeltPort {
-                entity_number: in_id,
-                position: doc.blueprint.entities[(in_id - 1) as usize].position,
-                item: input_item.clone(),
-                rate: row_rate * a / b,
-                lanes: "both".into(),
-            },
-            output: BeltPort {
-                entity_number: out_id,
-                position: doc.blueprint.entities[(out_id - 1) as usize].position,
-                item: request.product.clone(),
-                rate: row_rate,
-                lanes: "right".into(),
-            },
-        });
-        remaining -= n;
-        remaining_rate -= row_rate;
-    }
-    ensure!(
-        doc.blueprint.entities.len() <= 50000,
-        "Layout exceeds prototype entity budget"
-    );
-    let mut power = power::place_and_wire(data, &mut doc, &request.pole)?;
-    let demand = |e: &Entity| -> Result<f64> {
-        Ok((stat(e, "max_energy_usage")?
-            + e.prototype
-                .properties
-                .get("electric_energy_source")
-                .and_then(|v| v.get("drain"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0))
-            * 60.0)
-    };
-    power.installed_power_watts =
-        count as f64 * (demand(machine)? + 2.0 * arm_columns.len() as f64 * demand(arm)?);
-    doc.blueprint.description = format!(
-        "Output >= {:.3} {}/s; target input {:.3} {}/s; supply {:.3}/s including 5% headroom. Normal quality, no modules, stack size 1. Connect external power to pole #{} ({:.1},{:.1}); installed load <= {:.0} W. {} input/output belt pairs. See factory.json for port coordinates. Throughput is modelled until verified in game.",
-        request.rate,
-        request.product,
-        request.rate * a / b,
-        input_item,
-        planned * a / b,
-        power.connection_entity,
-        power.connection_position.x,
-        power.connection_position.y,
-        power.installed_power_watts,
-        rows.len()
-    );
-    let entity_sizes = [machine, belt, arm, pole]
-        .into_iter()
-        .map(|e| (e.prototype.name.clone(), [e.tile_width, e.tile_height]))
-        .collect();
-    let factory = GeneratedFactory {
-        schema_version: 1,
-        game_version: data.game_version.clone(),
-        mods: data.mods.clone(),
-        request: request.clone(),
-        recipe: recipe.prototype.name.clone(),
-        input_item,
-        machine_count: count,
-        input_per_second: request.rate * a / b,
-        supplied_input_per_second: planned * a / b,
-        planned_output_per_second: planned,
-        machine_crafts_per_second: crafts,
-        inserter_items_per_second: arm_rate,
-        belt_items_per_second: belt_rate,
-        power,
-        rows,
-        entity_sizes,
-        document: doc,
-    };
-    validate_factory(data, &factory)?;
-    Ok(factory)
+            let mut power = power::place_and_wire(data, &mut doc, &request.pole)?;
+            let demand = |e: &Entity| -> Result<f64> {
+                Ok((stat(e, "max_energy_usage")?
+                    + e.prototype
+                        .properties
+                        .get("electric_energy_source")
+                        .and_then(|v| v.get("drain"))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0))
+                    * 60.0)
+            };
+            let input_main_arms = if secondary.is_some() {
+                1
+            } else {
+                arm_columns.len()
+            };
+            power.installed_power_watts = count as f64
+                * (demand(machine)?
+                    + (input_main_arms + arm_columns.len()) as f64 * demand(arm)?
+                    + secondary.map(demand).transpose()?.unwrap_or(0.0));
+            let input_summary = flow
+                .ingredients
+                .iter()
+                .map(|(item, amount)| {
+                    format!(
+                        "{item}: target {:.3}/s, supply {:.3}/s",
+                        request.rate * amount / b,
+                        planned * amount / b
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            doc.blueprint.description = format!(
+                "Output >= {:.3} {}/s; inputs: {} (5% headroom). Normal quality, no modules, stack size 1. Connect external power to pole #{} ({:.1},{:.1}); installed load <= {:.0} W. {} input belts and {} output belts. See factory.json for port coordinates. Throughput is modelled until verified in game.",
+                request.rate,
+                request.product,
+                input_summary,
+                power.connection_entity,
+                power.connection_position.x,
+                power.connection_position.y,
+                power.installed_power_watts,
+                rows.iter().map(|r| r.input_ports().count()).sum::<usize>(),
+                rows.iter()
+                    .map(|r| r.output.entity_number)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+            );
+            let entity_sizes = [Some(machine), Some(belt), Some(arm), Some(pole), secondary]
+                .into_iter()
+                .flatten()
+                .map(|e| (e.prototype.name.clone(), [e.tile_width, e.tile_height]))
+                .collect();
+            let factory = GeneratedFactory {
+                schema_version: 1,
+                game_version: data.game_version.clone(),
+                mods: data.mods.clone(),
+                request: request.clone(),
+                recipe: recipe.prototype.name.clone(),
+                input_item: input_item.clone(),
+                inputs: flow
+                    .ingredients
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (item, amount))| InputRequirement {
+                        item: item.clone(),
+                        per_second: request.rate * amount / b,
+                        supplied_per_second: planned * amount / b,
+                        inserter: if i == 1 {
+                            secondary.unwrap().prototype.name.clone()
+                        } else {
+                            request.inserter.clone()
+                        },
+                        inserter_items_per_second: if i == 1 { secondary_rate } else { arm_rate },
+                    })
+                    .collect(),
+                machine_count: count,
+                input_per_second: request.rate * a / b,
+                supplied_input_per_second: planned * a / b,
+                planned_output_per_second: planned,
+                machine_crafts_per_second: crafts,
+                inserter_items_per_second: arm_rate,
+                belt_items_per_second: belt_rate,
+                power,
+                rows,
+                entity_sizes,
+                document: doc,
+            };
+            validate_factory(data, &factory)?;
+            Ok(factory)
+        },
+    )
 }

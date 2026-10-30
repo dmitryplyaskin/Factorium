@@ -1,4 +1,5 @@
 @layer reset,base,components,responsive;
+@layer components{#lane-results>.table-scroll,#ingredient-results>.table-scroll{display:block;max-width:100%;max-height:280px;overflow:auto}#secondary-equipment{grid-column:1/-1}#secondary-equipment .field-label{display:block;margin-top:12px}.recipe-flow #input-label{white-space:normal;overflow-wrap:anywhere;max-width:140px}.ports-summary p{flex-wrap:wrap}.flow-note{max-width:350px}}
 @layer reset{*{box-sizing:border-box}html{color-scheme:dark}body,h1,h2,h3,p{margin:0}button,input,select,textarea{font:inherit}button,a,input,select,textarea{-webkit-tap-highlight-color:transparent}button{cursor:pointer}button:disabled{cursor:not-allowed}svg{display:block}img{max-width:100%}fieldset{border:0;padding:0;margin:0;min-width:0}button,a,select,input,textarea{touch-action:manipulation}[hidden]{display:none!important}a{color:inherit;text-decoration:none}}
 @layer base{
   :root{--bg:#11161c;--panel:#191f27;--panel-deep:#151b22;--line:#303945;--line-soft:#262f3a;--text:#e9edf2;--muted:#a3afbd;--subtle:#778596;--amber:#edbd65;--amber-hover:#f8ce82;--mint:#85d9ba;--red:#f19b97;--mono:Consolas,"Cascadia Code",monospace}

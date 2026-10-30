@@ -34,7 +34,7 @@ enum Commands {
         #[command(flatten)]
         game: GameArgs,
     },
-    /// Generate a single-input/single-output solid recipe line.
+    /// Generate a solid recipe line with one or two ingredients and one product.
     Generate {
         #[arg(long)]
         product: String,
@@ -48,6 +48,9 @@ enum Commands {
         belt: String,
         #[arg(long, default_value = "fast-inserter")]
         inserter: String,
+        /// Two-tile-reach inserter for a second ingredient (auto-selected by default).
+        #[arg(long)]
+        secondary_inserter: Option<String>,
         #[arg(long, default_value = "small-electric-pole")]
         pole: String,
         #[arg(long, default_value = "data/game/catalog.json")]
@@ -217,6 +220,7 @@ fn main() -> Result<()> {
             machine,
             belt,
             inserter,
+            secondary_inserter,
             pole,
             catalog,
             output,
@@ -232,6 +236,7 @@ fn main() -> Result<()> {
                 machine,
                 belt,
                 inserter,
+                secondary_inserter,
                 pole,
             };
             let factory = generate_blueprint(&data, &request)?;
@@ -244,9 +249,21 @@ fn main() -> Result<()> {
                 factory.rows.len()
             );
             println!(
-                "Input {}: target {:.3}/s, supply {:.3}/s including headroom",
-                factory.input_item, factory.input_per_second, factory.supplied_input_per_second
+                "Ports: {} input belts, {} output belts ({} using both lanes)",
+                factory.input_ports().count(),
+                factory.output_ports().len(),
+                factory
+                    .output_ports()
+                    .iter()
+                    .filter(|p| p.lanes == "both")
+                    .count()
             );
+            for input in factory.input_requirements() {
+                println!(
+                    "Input {}: target {:.3}/s, supply {:.3}/s including headroom ({})",
+                    input.item, input.per_second, input.supplied_per_second, input.inserter
+                );
+            }
             println!(
                 "Power: {} x {} | supply radius: {} | wire reach: {} | installed load <= {:.0} W",
                 factory.power.pole_count,

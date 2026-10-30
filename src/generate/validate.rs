@@ -7,7 +7,7 @@ use anyhow::{Context, Result, ensure};
 use super::{
     GeneratedFactory, entity,
     power::{covered, distance, tiles},
-    stat, supported_recipe,
+    stat,
 };
 use crate::GameData;
 
@@ -29,6 +29,7 @@ pub fn validate_factory(data: &GameData, f: &GeneratedFactory) -> Result<()> {
     let mut machines = BTreeSet::new();
     let mut belts = BTreeSet::new();
     let mut arms = BTreeSet::new();
+    let requirements = f.input_requirements();
     for e in entities {
         ensure!(
             e.entity_number > 0 && ids.insert(e.entity_number, e).is_none(),
@@ -53,9 +54,14 @@ pub fn validate_factory(data: &GameData, f: &GeneratedFactory) -> Result<()> {
         } else if e.name == f.request.belt {
             ensure!(e.direction == 4, "Belt must face east");
             belts.insert(e.entity_number);
-        } else if e.name == f.request.inserter {
+        } else if e.name == f.request.inserter || requirements.iter().any(|r| r.inserter == e.name)
+        {
             ensure!(
-                e.direction == 0 && e.override_stack_size == Some(1),
+                proto.prototype.prototype_type == "inserter",
+                "Input equipment is not an inserter"
+            );
+            ensure!(
+                matches!(e.direction, 0 | 8) && e.override_stack_size == Some(1),
                 "Inserter direction or stack-size override changed"
             );
             arms.insert(e.entity_number);
@@ -73,15 +79,6 @@ pub fn validate_factory(data: &GameData, f: &GeneratedFactory) -> Result<()> {
     ensure!(
         !poles.is_empty() && poles.len() == f.power.pole_count,
         "Pole count mismatch"
-    );
-    let recipe = data
-        .recipes
-        .get(&f.recipe)
-        .context("Unknown factory recipe")?;
-    let (input, a, b) = supported_recipe(data, recipe, entity(data, &f.request.machine)?)?;
-    ensure!(
-        input == f.input_item && recipe.products[0].name == f.request.product,
-        "Input/output item mismatch"
     );
     let mut graph: BTreeMap<u32, Vec<u32>> = poles.keys().map(|&id| (id, Vec::new())).collect();
     let mut wire_set = BTreeSet::new();
@@ -144,161 +141,5 @@ pub fn validate_factory(data: &GameData, f: &GeneratedFactory) -> Result<()> {
             );
         }
     }
-    let mut used_belts = BTreeSet::new();
-    let mut used_machines = BTreeSet::new();
-    let mut used_arms = BTreeSet::new();
-    let touches_tile = |id: u32, tile: (i32, i32)| -> Result<bool> {
-        let e = ids[&id];
-        let box_ = entity(data, &e.name)?.collision_box;
-        Ok(e.position.x + box_.right_bottom.x > f64::from(tile.0)
-            && e.position.x + box_.left_top.x < f64::from(tile.0 + 1)
-            && e.position.y + box_.right_bottom.y > f64::from(tile.1)
-            && e.position.y + box_.left_top.y < f64::from(tile.1 + 1))
-    };
-    let walk = |start: u32| -> Result<Vec<u32>> {
-        let mut list = Vec::new();
-        let mut current = start;
-        loop {
-            let e = *ids.get(&current).context("Unknown belt port")?;
-            ensure!(e.name == f.request.belt, "Port is not a belt");
-            list.push(current);
-            let tile = (e.position.x.floor() as i32 + 1, e.position.y.floor() as i32);
-            match occupied.get(&tile).and_then(|id| ids.get(id)) {
-                Some(next) if next.name == f.request.belt => current = next.entity_number,
-                _ => break,
-            }
-        }
-        Ok(list)
-    };
-    let mut output_rate = 0.0;
-    let mut input_rate = 0.0;
-    for row in &f.rows {
-        ensure!(
-            row.input.rate.is_finite()
-                && row.output.rate.is_finite()
-                && row.input.rate > 0.0
-                && row.output.rate > 0.0,
-            "Invalid row flow rate"
-        );
-        ensure!(
-            row.input.item == f.input_item && row.output.item == f.request.product,
-            "Row item mismatch"
-        );
-        ensure!(
-            (row.input.rate - row.output.rate * a / b).abs() < 1e-6,
-            "Row violates recipe material balance"
-        );
-        ensure!(
-            ids.get(&row.input.entity_number)
-                .is_some_and(|e| e.position == row.input.position)
-                && ids
-                    .get(&row.output.entity_number)
-                    .is_some_and(|e| e.position == row.output.position),
-            "Port coordinates mismatch"
-        );
-        let input_line = walk(row.input.entity_number)?;
-        // Find the westmost belt on the output's row, then walk actual adjacency.
-        let last = ids[&row.output.entity_number];
-        let first = entities
-            .iter()
-            .filter(|e| e.name == f.request.belt && e.position.y == last.position.y)
-            .min_by(|a, b| a.position.x.total_cmp(&b.position.x))
-            .context("Missing output line")?;
-        let output_line = walk(first.entity_number)?;
-        ensure!(
-            output_line.last() == Some(&row.output.entity_number),
-            "Output port is not the end of its belt"
-        );
-        for &id in input_line.iter().chain(&output_line) {
-            ensure!(used_belts.insert(id), "Belt reused by multiple rows");
-        }
-        let row_machines: BTreeSet<_> = row.machines.iter().copied().collect();
-        ensure!(
-            row_machines.len() == row.machines.len() && !row_machines.is_empty(),
-            "Invalid row machine list"
-        );
-        let mut inputs: HashMap<u32, usize> = HashMap::new();
-        let mut outputs: HashMap<u32, usize> = HashMap::new();
-        for &id in &row.machines {
-            ensure!(
-                machines.contains(&id) && used_machines.insert(id),
-                "Machine reused or missing"
-            );
-        }
-        for &id in &arms {
-            let arm = ids[&id];
-            let source = occupied.get(&(
-                arm.position.x.floor() as i32,
-                arm.position.y.floor() as i32 - 1,
-            ));
-            let dest = occupied.get(&(
-                arm.position.x.floor() as i32,
-                arm.position.y.floor() as i32 + 1,
-            ));
-            if let (Some(src), Some(dst)) = (source, dest) {
-                if input_line.contains(src) && row_machines.contains(dst) {
-                    ensure!(
-                        touches_tile(
-                            *dst,
-                            (
-                                arm.position.x.floor() as i32,
-                                arm.position.y.floor() as i32 + 1
-                            )
-                        )?,
-                        "Inserter cannot reach the machine's collision box"
-                    );
-                    ensure!(used_arms.insert(id), "Inserter reused");
-                    *inputs.entry(*dst).or_default() += 1;
-                }
-                if row_machines.contains(src) && output_line.contains(dst) {
-                    ensure!(
-                        touches_tile(
-                            *src,
-                            (
-                                arm.position.x.floor() as i32,
-                                arm.position.y.floor() as i32 - 1
-                            )
-                        )?,
-                        "Inserter cannot reach the machine's collision box"
-                    );
-                    ensure!(used_arms.insert(id), "Inserter reused");
-                    *outputs.entry(*src).or_default() += 1;
-                }
-            }
-        }
-        for &id in &row.machines {
-            ensure!(
-                inputs.contains_key(&id) && outputs.contains_key(&id),
-                "Machine #{id} lacks physical input/output inserters"
-            );
-        }
-        let belt_speed = entity(data, &f.request.belt)?.prototype.properties["belt_speed"]
-            .as_f64()
-            .context("Missing belt speed")?
-            * 480.0;
-        ensure!(
-            row.input.rate <= belt_speed + 1e-8 && row.output.rate <= belt_speed * 0.5 + 1e-8,
-            "Row exceeds input belt or output-lane capacity"
-        );
-        let in_arms = inputs.values().sum::<usize>() as f64;
-        let out_arms = outputs.values().sum::<usize>() as f64;
-        ensure!(
-            row.input.rate <= in_arms * f.inserter_items_per_second + 1e-6
-                && row.output.rate <= out_arms * f.inserter_items_per_second + 1e-6,
-            "Row exceeds modelled inserter capacity"
-        );
-        output_rate += row.output.rate;
-        input_rate += row.input.rate;
-    }
-    ensure!(
-        used_belts == belts && used_arms == arms && used_machines == machines,
-        "Disconnected, unused or misdirected transport entity"
-    );
-    ensure!(
-        output_rate >= f.request.rate
-            && (output_rate - f.planned_output_per_second).abs() < 1e-6
-            && (input_rate - f.supplied_input_per_second).abs() < 1e-6,
-        "Factory flow totals do not meet the request"
-    );
-    Ok(())
+    super::transport::validate(data, f, &ids, &occupied, &machines, &belts, &arms)
 }

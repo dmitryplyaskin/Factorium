@@ -24,7 +24,8 @@ use tokio::sync::Semaphore;
 
 use crate::{
     ExtractOptions, FactoryRequest, GameData, GeneratedFactory, SimulationOptions,
-    generate::supported_recipe, generate_blueprint, verify_in_game,
+    generate::{inserter_reach, supported_recipe},
+    generate_blueprint, verify_in_game,
 };
 
 pub struct WebOptions {
@@ -162,7 +163,7 @@ fn build_catalog(data: &GameData, game_available: bool) -> Value {
     let recipes:Vec<_>=data.recipes.values().filter_map(|r| {
         let compatible:Vec<_>=machines.iter().filter(|m|supported_recipe(data,r,m).is_ok()).map(|m|m.prototype.name.clone()).collect();
         if compatible.is_empty() {return None;}
-        Some(json!({"name":r.prototype.name,"product":r.products[0].name,"input":r.ingredients[0].name,"input_amount":r.ingredients[0].amount,"output_amount":r.products[0].amount.or(r.products[0].amount_min),"seconds":r.energy,"machines":compatible}))
+        Some(json!({"name":r.prototype.name,"product":r.products[0].name,"input":r.ingredients[0].name,"input_amount":r.ingredients[0].amount,"ingredients":r.ingredients.iter().map(|a|json!({"item":a.name,"amount":a.amount})).collect::<Vec<_>>(),"output_amount":r.products[0].amount.or(r.products[0].amount_min),"seconds":r.energy,"machines":compatible}))
     }).collect();
     let equipment = |kind: &str| {
         data.entities
@@ -192,8 +193,13 @@ fn build_catalog(data: &GameData, game_available: bool) -> Value {
         .filter(|e| e.tile_width <= 4 && e.tile_height <= 4)
         .map(option)
         .collect();
+    let long_inserters: Vec<_> = equipment("inserter")
+        .into_iter()
+        .filter(|e| inserter_reach(e, 2))
+        .map(option)
+        .collect();
     json!({"game_version":data.game_version,"mods":data.mods,"recipe_count":data.recipes.len(),"recipes":recipes,
-        "machines":machines.into_iter().map(option).collect::<Vec<_>>(),"belts":belts,"inserters":inserters,"poles":poles,
+        "machines":machines.into_iter().map(option).collect::<Vec<_>>(),"belts":belts,"inserters":inserters,"long_inserters":long_inserters,"poles":poles,
         "verification_available":game_available,"verification_hint":if game_available {"Factorio готова к проверке"} else {"Factorio не найдена. Запустите сервер с параметром --factorio."}})
 }
 

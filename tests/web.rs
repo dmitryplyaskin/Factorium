@@ -140,6 +140,56 @@ async fn catalogs_only_compatible_recipes_and_generates_exportable_snapshots() {
 }
 
 #[tokio::test]
+async fn catalog_and_exports_include_both_solid_ingredients() {
+    let app = app();
+    let catalog = json_body(
+        app.clone()
+            .oneshot(request("GET", "/api/catalog", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let recipe = catalog["recipes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "electronic-circuit")
+        .unwrap();
+    assert_eq!(recipe["ingredients"].as_array().unwrap().len(), 2);
+    assert!(!catalog["long_inserters"].as_array().unwrap().is_empty());
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/artifacts",
+            serde_json::to_value(FactoryRequest::new("electronic-circuit", 1.0)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let artifact = json_body(response).await;
+    assert_eq!(artifact["factory"]["inputs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        artifact["factory"]["rows"][0]["additional_inputs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let path = format!(
+        "/api/artifacts/{}/export/factory",
+        artifact["id"].as_str().unwrap()
+    );
+    let exported = json_body(
+        app.oneshot(request("GET", &path, Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(exported, artifact["factory"]);
+}
+
+#[tokio::test]
 async fn validation_errors_are_json_and_do_not_create_successful_artifacts() {
     let app = app();
     let mut bad = FactoryRequest::new("iron-gear-wheel", 5.0);

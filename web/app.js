@@ -1,4 +1,4 @@
-import { label, number, power, sameRequest, chooseMachine, verificationState } from './model.js';
+import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputRequirements, recipeIngredients } from './model.js';
 
 const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -25,7 +25,7 @@ async function api(path,options={}) {
 
 function request() {
   const recipe=state.catalog?.recipes.find(r=>r.name===$('recipe-select').value);
-  return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,pole:$('pole').value};
+  return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,secondary_inserter:recipeIngredients(recipe).length===2?$('secondary-inserter').value:null,pole:$('pole').value};
 }
 function dirty() {return state.artifact && !sameRequest(request(),state.artifact.factory.request);}
 function populate(id,options,value) {
@@ -38,11 +38,13 @@ function recipeChanged(preferredMachine=$('machine').value) {
   if(!recipe)return;
   populate('machine',recipe.machines,chooseMachine(recipe,preferredMachine));
   text('recipe-id',recipe.name);$('product-icon').src=iconURL(recipe.product);
-  $('input-icon').src=iconURL(recipe.input);text('input-label',label(recipe.input));text('output-label',label(recipe.product));
+  const ingredients=recipeIngredients(recipe),two=ingredients.length===2;
+  $('input-icon').src=iconURL(ingredients[0].item);text('input-label',ingredients.map(i=>label(i.item)).join(' + '));text('output-label',label(recipe.product));
+  $('secondary-equipment').hidden=!two;$('secondary-inserter').disabled=!two;$('secondary-inserter').required=two;
   equipmentChanged();
 }
 function equipmentChanged() {
-  for(const id of ['machine','belt','inserter','pole'])$(id+'-icon').src=iconURL($(id).value);
+  for(const id of ['machine','belt','inserter','secondary-inserter','pole'])$(id+'-icon').src=iconURL($(id).value || 'long-handed-inserter');
   const find=(type,id)=>state.catalog[type].find(e=>e.name===$(id).value);
   const machine=find('machines','machine'),belt=find('belts','belt'),pole=find('poles','pole');
   text('machine-detail',machine ? `${machine.width} × ${machine.height} тайла · скорость ${number(machine.speed)}×` : '');
@@ -65,6 +67,7 @@ async function initialize() {
     populate('recipe-select',recipes.map(r=>({name:r.name})),defaultRecipe);
     populate('belt',catalog.belts,saved?.belt || 'transport-belt');
     populate('inserter',catalog.inserters,saved?.inserter || 'fast-inserter');
+    populate('secondary-inserter',catalog.long_inserters || [],saved?.secondary_inserter || 'long-handed-inserter');
     populate('pole',catalog.poles,saved?.pole || 'small-electric-pole');
     if(saved?.rate>0 && Number.isFinite(saved.rate))$('rate').value=String(saved.rate);
     recipeChanged(saved?.machine || 'assembling-machine-2');
@@ -113,21 +116,24 @@ function setArtifact(artifact,restoreForm=false) {
   showError('generation-error','');
   stopPolling();state.artifact=artifact;state.selected=null;$('entity-inspector').hidden=true;
   const f=artifact.factory;
-  if(restoreForm){populate('recipe-select',state.catalog.recipes.map(r=>({name:r.name})).sort((a,b)=>label(a.name).localeCompare(label(b.name),'ru')),f.request.recipe);$('rate').value=f.request.rate;recipeChanged(f.request.machine);for(const key of ['belt','inserter','pole'])$(key).value=f.request[key];equipmentChanged();persist();}
+  if(restoreForm){populate('recipe-select',state.catalog.recipes.map(r=>({name:r.name})).sort((a,b)=>label(a.name).localeCompare(label(b.name),'ru')),f.request.recipe);$('rate').value=f.request.rate;recipeChanged(f.request.machine);for(const key of ['belt','inserter','pole'])$(key).value=f.request[key];if(f.request.secondary_inserter)$('secondary-inserter').value=f.request.secondary_inserter;equipmentChanged();persist();}
   text('result-title',label(f.request.product));
   $('metric-output').replaceChildren(document.createTextNode(number(f.request.rate)),element('small','',' предм./с'));
   text('metric-output-note','Цель · выпуск не ниже заданного');
-  text('metric-machines',number(f.machine_count,0));text('metric-machines-note',`${number(f.rows.length,0)} ${f.rows.length===1?'производственный ряд':'производственных рядов'}`);
-  $('metric-input').replaceChildren(document.createTextNode(number(f.supplied_input_per_second)),element('small','',' предм./с'));
+  text('metric-machines',number(f.machine_count,0));text('metric-machines-note',`Производственных рядов: ${number(f.rows.length,0)}`);
+  const requirements=inputRequirements(f);
+  $('metric-input').replaceChildren(document.createTextNode(number(requirements.reduce((sum,r)=>sum+r.supplied_per_second,0))),element('small','',' предм./с'));
+  text('metric-input-note',requirements.length===2?'2 ингредиента · запас 5%':'С запасом 5% к расчёту');
   text('metric-power',power(f.power.installed_power_watts));text('metric-power-note',`${f.power.pole_count} столбов · верхняя оценка нагрузки`);
   text('entity-count',`${f.document.blueprint.entities.length} сущностей`);
-  text('canvas-caption',`${f.machine_count} машин · ${label(f.request.pole)} · ${number(f.power.supply_area_distance*2)} × ${number(f.power.supply_area_distance*2)} тайлов питания`);
+  text('canvas-caption',`${f.machine_count} машин · выходных лент: ${outputPorts(f).length} · ${label(f.request.pole)} · ${number(f.power.supply_area_distance*2)} × ${number(f.power.supply_area_distance*2)} тайлов питания`);
   $('canvas-empty').hidden=true;
   drawFactory(f);renderPorts(f);renderVerification();updateState();
   if(artifact.verification.status==='running')startPolling(artifact.id);
 }
 
 function drawFactory(f) {
+  const requirements=inputRequirements(f);
   const scene=$('scene');scene.replaceChildren(svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
   const powerGroup=svg('g',{'data-layer':'power'}),wireGroup=svg('g',{'data-layer':'wires'}),bodyGroup=svg('g'),portsGroup=svg('g',{'data-layer':'ports'});
   const entities=f.document.blueprint.entities,byID=new Map(entities.map(e=>[e.entity_number,e]));
@@ -145,9 +151,11 @@ function drawFactory(f) {
     } else if(e.name===f.request.belt){
       group.append(svg('rect',{class:'entity-body',x:x-.47,y:y-.47,width:.94,height:.94,rx:.05,fill:'#7d683b',stroke:'#b39859','stroke-width':.035}));
       group.append(svg('path',{d:`M ${x-.27} ${y-.29} L ${x+.06} ${y-.29} L ${x-.08} ${y-.4} M ${x-.27} ${y+.21} L ${x+.12} ${y+.21} L ${x-.02} ${y+.1}`,fill:'none',stroke:'#dbbd73','stroke-width':.07,'pointer-events':'none'}));
-    } else if(e.name===f.request.inserter){
-      group.append(svg('rect',{class:'entity-body',x:x-.23,y:y-.23,width:.46,height:.46,rx:.1,fill:'#304967',stroke:'#9abbdc','stroke-width':.06}));
-      group.append(svg('path',{d:`M ${x} ${y-.68} L ${x} ${y+.62}`,fill:'none',stroke:'#91b5d9','stroke-width':.10,'pointer-events':'none'}));
+    } else if(e.name===f.request.inserter || requirements.some(r=>r.inserter===e.name)){
+      const long=e.name!==f.request.inserter,reach=long?1.62:.62,color=long?'#e6a182':'#91b5d9';
+      group.append(svg('rect',{class:'entity-body',x:x-.23,y:y-.23,width:.46,height:.46,rx:.1,fill:long?'#634037':'#304967',stroke:color,'stroke-width':.06}));
+      group.append(svg('path',{d:`M ${x} ${y-reach} L ${x} ${y+reach}`,fill:'none',stroke:color,'stroke-width':.10,'pointer-events':'none'}));
+      group.append(svg('path',{d:e.direction===8?`M ${x-.13} ${y-reach+.24} L ${x} ${y-reach} L ${x+.13} ${y-reach+.24}`:`M ${x-.13} ${y+reach-.24} L ${x} ${y+reach} L ${x+.13} ${y+reach-.24}`,fill:'none',stroke:color,'stroke-width':.07,'pointer-events':'none'}));
       group.append(svg('circle',{cx:x,cy:y,r:.11,fill:'#c1d7e9','pointer-events':'none'}));
     } else {
       group.append(svg('rect',{class:'entity-body',x:x-w/2+.12,y:y-h/2+.12,width:w-.24,height:h-.24,rx:.06,fill:'#776747',stroke:'#dac48b','stroke-width':.06}));
@@ -156,13 +164,13 @@ function drawFactory(f) {
     bodyGroup.append(group);
   }
   for(const [a,,b] of f.document.blueprint.wires){const p=byID.get(a).position,q=byID.get(b).position;wireGroup.append(svg('path',{d:`M ${p.x} ${p.y} Q ${(p.x+q.x)/2} ${(p.y+q.y)/2+.3} ${q.x} ${q.y}`,fill:'none',stroke:'#dbb96d','stroke-opacity':.75,'stroke-width':.045}));}
-  f.rows.forEach((row,i)=>{
-    for(const [port,isOutput] of [[row.input,false],[row.output,true]]) {
+  for(const [ports,isOutput] of [[inputPorts(f),false],[outputPorts(f),true]]) {
+    ports.forEach((port,i)=>{
       const x=port.position.x,y=port.position.y,color=isOutput?'#edbd65':'#85d9ba';
       portsGroup.append(svg('path',{d:isOutput?`M ${x+.5} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`:`M ${x-2.2} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`,fill:'none',stroke:color,'stroke-width':.09}));
       portsGroup.append(svg('text',{x:isOutput?x+2.5:x-2.5,y:y+.16,'text-anchor':isOutput?'start':'end',fill:color,'font-size':.52,'font-family':'Segoe UI, sans-serif'},`${isOutput?'Выход':'Вход'} ${i+1}`));
-    }
-  });
+    });
+  }
   const p=f.power.connection_position;
   portsGroup.append(svg('circle',{cx:p.x,cy:p.y,r:.65,fill:'none',stroke:'#c9b5ec','stroke-width':.08,'stroke-dasharray':'.15 .12'}));
   scene.append(powerGroup,wireGroup,bodyGroup,portsGroup);
@@ -201,15 +209,17 @@ function inspect(id) {
 }
 
 function renderPorts(f) {
-  $('ports-empty').hidden=true;$('ports-content').hidden=false;text('ports-count',String(f.rows.length*2+1));
-  text('ports-input-name',label(f.input_item));text('ports-output-name',label(f.request.product));text('theoretical-input',`${number(f.input_per_second)} предм./с`);
+  const outputs=outputPorts(f),inputs=inputPorts(f),requirements=inputRequirements(f);
+  $('ports-empty').hidden=true;$('ports-content').hidden=false;text('ports-count',String(inputs.length+outputs.length+1));
+  text('ports-input-name',requirements.map(r=>label(r.item)).join(' + '));text('ports-output-name',label(f.request.product));text('theoretical-input',requirements.map(r=>`${label(r.item)}: ${number(r.per_second)}/с`).join(' · '));
   const body=$('ports-body');body.replaceChildren();
   const add=(name,item,rate,position,kind,hint)=>{
     const tr=element('tr'),nameCell=element('td');nameCell.append(element('span',`port-type ${kind}`),document.createTextNode(name));
     const itemCell=element('td','',item);if(hint)itemCell.append(element('span','port-hint',hint));
     const rateCell=element('td','',rate),pointCell=element('td'),button=element('button','coordinate-button',`${number(position.x)}; ${number(position.y)}`);button.type='button';button.setAttribute('aria-label',`Показать на схеме: ${name}`);button.addEventListener('click',()=>focusPoint(position.x,position.y));pointCell.append(button);tr.append(nameCell,itemCell,rateCell,pointCell);body.append(tr);
   };
-  f.rows.forEach((row,i)=>{add(`Вход ${i+1}`,label(row.input.item),`${number(row.input.rate)} /с`,row.input.position,'input','Подключение с запада · обе полосы');add(`Выход ${i+1}`,label(row.output.item),`${number(row.output.rate)} /с`,row.output.position,'output','Продолжение на восток · одна полоса');});
+  inputs.forEach((port,i)=>add(`Вход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',`Ряд ${port.row_index} · ${port.ingredient_index===1?'дальняя':'ближняя'} лента · обе полосы`));
+  outputs.forEach((port,i)=>add(`Выход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'output',port.lanes==='both'?`Левая ${number(port.left_rate)}/с · правая ${number(port.right_rate)}/с`:`${port.lanes==='left'?'Левая':'Правая'} полоса · продолжение на восток`));
   add('Питание',`Столб #${f.power.connection_entity}`,`до ${power(f.power.installed_power_watts)}`,f.power.connection_position,'power','Подключите к внешней электросети');
 }
 
@@ -221,6 +231,33 @@ function renderChart(rates,target) {
   chart.setAttribute('aria-label',`Цель ${number(target)} в секунду. Измерения: ${rates.map(value=>number(value)).join(', ')}.`);
 }
 
+function renderLaneMeasurements(report,factory) {
+  let section=$('lane-results');
+  if(!section){section=element('details','simulation-settings');section.id='lane-results';$('verification-results').append(section);}
+  section.replaceChildren();section.hidden=!report.row_outputs?.length;
+  if(section.hidden)return;
+  section.open=report.row_outputs.length<=4;
+  section.append(element('summary','',`Выпуск по рядам и полосам · ${report.row_outputs.length}`));
+  const scroll=element('div','table-scroll'),table=element('table'),head=element('thead'),header=element('tr');
+  for(const name of ['Выход','Ряд / полоса','Цель, /с','Измерено, /с']){const th=element('th','',name);th.scope='col';header.append(th);}
+  head.append(header);table.append(head);const body=element('tbody'),ports=outputPorts(factory);
+  for(const row of report.row_outputs){const tr=element('tr');for(const value of [`Выход ${ports.findIndex(p=>p.entity_number===row.output_entity)+1}`,`${row.row_index} · ${row.lane==='left'?'левая':'правая'}`,number(row.target_per_second),number(row.measured_per_second)])tr.append(element('td','',value));body.append(tr);}
+  table.append(body);scroll.append(table);section.append(scroll);
+}
+
+function renderInputMeasurements(report) {
+  let section=$('ingredient-results');
+  if(!section){section=element('details','simulation-settings');section.id='ingredient-results';$('verification-results').append(section);}
+  section.replaceChildren();section.hidden=!report.input_deliveries?.length;
+  if(section.hidden)return;
+  section.open=report.input_deliveries.length<=4;section.append(element('summary','',`Подача ингредиентов · входов: ${report.input_deliveries.length}`));
+  const scroll=element('div','table-scroll'),table=element('table'),head=element('thead'),header=element('tr');
+  for(const name of ['Предмет','Ряд','Подача, /с','Измерено, /с']){const th=element('th','',name);th.scope='col';header.append(th);}
+  head.append(header);table.append(head);const body=element('tbody');
+  for(const input of report.input_deliveries){const tr=element('tr');for(const value of [label(input.item),input.row_index,number(input.supplied_per_second),number(input.measured_per_second)])tr.append(element('td','',value));body.append(tr);}
+  table.append(body);scroll.append(table);section.append(scroll);
+}
+
 function renderVerification() {
   const artifact=state.artifact,job=artifact?.verification,running=job?.status==='running',report=job?.report;
   $('verification-running').hidden=!running;$('verification-results').hidden=!report;
@@ -229,6 +266,8 @@ function renderVerification() {
   $('verify-button').querySelector('span').textContent=running?'Проверяем…':report || job?.status==='error'?'Проверить ещё раз':'Проверить в Factorio';
   showError('verification-errors',job?.error || report?.errors?.join('\n') || '');
   if(report){text('measured-rate',`${number(report.measured_output_per_second)} /с`);text('measured-target',`Цель: ≥ ${number(artifact.factory.request.rate)} предм./с`);text('network-count',number(report.network_count,0));text('powered-count',report.unpowered_entities.length?`${report.unpowered_entities.length} сущностей без питания`:'Все потребители запитаны');text('delivered-count',number(report.delivered_items,0));text('measurement-note',`За ${number(report.measurement_ticks/60,0)} игровых секунд`);renderChart(report.window_rates,artifact.factory.request.rate);}
+  if(report)renderLaneMeasurements(report,artifact.factory);
+  if(report)renderInputMeasurements(report);
   clearInterval(state.clock);state.clock=null;
   if(running){const update=()=>text('verification-elapsed',`${Math.max(0,Math.floor((Date.now()-job.started_at)/1000))} с`);update();state.clock=setInterval(update,1000);}
   updateState();
@@ -295,7 +334,7 @@ function activateTab(name,focus=false) {
 $('factory-form').addEventListener('submit',generate);
 $('factory-form').addEventListener('input',()=>{updateState();persist();});
 $('recipe-select').addEventListener('change',()=>{recipeChanged();persist();});
-for(const id of ['machine','belt','inserter','pole'])$(id).addEventListener('change',()=>{equipmentChanged();persist();});
+for(const id of ['machine','belt','inserter','secondary-inserter','pole'])$(id).addEventListener('change',()=>{equipmentChanged();persist();});
 for(const button of document.querySelectorAll('[data-rate]'))button.addEventListener('click',()=>{$('rate').value=button.dataset.rate;updateState();persist();});
 for(const [id,layer] of [['show-power','power'],['show-wires','wires'],['show-ports','ports']])$(id).addEventListener('change',()=>$('viewport').classList.toggle(`hide-${layer}`,!$(id).checked));
 $('zoom-in').addEventListener('click',()=>zoom(1.3));$('zoom-out').addEventListener('click',()=>zoom(1/1.3));$('zoom-fit').addEventListener('click',fit);
