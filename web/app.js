@@ -2,11 +2,13 @@ import { label, number, power, sameRequest, chooseMachine, verificationState, ou
 import { transportLayout, transportSymbols, transportTile, transportDevice, transportPalette, directionLabel } from './transport.js';
 import { entitySymbols, entitySprite, wirePoint, inputMarkerBadge } from './entities.js';
 import { SpriteRenderer } from './renderer.js';
+import { GenerationTask, generationProgress } from './generation.js';
 
 const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
 const state = { catalog:null, artifact:null, generating:false, poll:null, clock:null, history:[], view:null, fitted:null, drag:null, selected:null, renderer:null, stringCache:new Map() };
 let toastTimer;
+let generationTask=null;
 let activePanel=null, panelTrigger=null, recipeFilter='all', interfaceHidden=false;
 
 function closePanel(restoreFocus=true) {
@@ -199,6 +201,7 @@ function updateState() {
   $('generate-button').querySelector('span').textContent=state.generating?'Строим чертёж…':'Построить чертёж';
   $('rebuild-button').disabled=state.generating;
   $('canvas-busy').hidden=!state.generating;
+  $('cancel-generation-config').hidden=!state.generating;
   const status=state.generating ? {text:'Строим…',tone:'warning'} : stale ? {text:'Параметры изменены',tone:'warning'} : have ? verificationState(job) : {text:'Ожидание',tone:'neutral'};
   $('snapshot-badge').className=`badge ${status.tone}`;text('snapshot-badge',status.text);
   for(const button of document.querySelectorAll('[data-rate]'))button.classList.toggle('active',Number(button.dataset.rate)===Number($('rate').value));
@@ -212,13 +215,32 @@ async function generate(event) {
     $('factory-form').reportValidity();return;
   }
   const input=request();state.generating=true;showError('generation-error','');$('config-fields').disabled=true;updateState();
+  const started=Date.now();let progress={},cancelled=false;
+  const renderProgress=()=>text('generation-progress',generationProgress(progress,Math.floor((Date.now()-started)/1000)));
+  const cancelError=error=>{showError('generation-error',error.message);setCancelPending(false);};
+  const task=new GenerationTask(api,{onProgress:job=>{progress=job.progress;renderProgress();},onCancelError:cancelError});
+  generationTask=task;setCancelPending(false);renderProgress();
+  const timer=setInterval(renderProgress,1000);
   try {
-    const artifact=await api('/api/artifacts',{method:'POST',body:JSON.stringify(input)});
+    const artifact=await task.run(input);
+    if(!artifact){cancelled=true;toast('Генерация отменена');return;}
     if(event)closePanel(false);
     setArtifact(artifact);persist();await refreshHistory();
     if(event)$('viewport').focus({preventScroll:true});
   } catch(error){if(activePanel!=='config-panel')openPanel('config-panel');showError('generation-error',error.message);}
-  finally{state.generating=false;$('config-fields').disabled=false;updateState();}
+  finally{clearInterval(timer);generationTask=null;state.generating=false;$('config-fields').disabled=false;updateState();if(cancelled)$(activePanel==='config-panel'?'generate-button':'viewport').focus({preventScroll:true});}
+}
+
+function setCancelPending(pending) {
+  for(const id of ['cancel-generation','cancel-generation-config']) {
+    $(id).disabled=pending;$(id).textContent=pending?'Отменяем…':'Отменить генерацию';
+  }
+}
+async function cancelGeneration() {
+  if(!generationTask)return;
+  setCancelPending(true);
+  try {await generationTask.cancel();}
+  catch(error){showError('generation-error',error.message);setCancelPending(false);}
 }
 
 function setArtifact(artifact,restoreForm=false) {
@@ -565,6 +587,8 @@ function activateTab(name,focus=false) {
 }
 
 $('factory-form').addEventListener('submit',generate);
+$('cancel-generation').addEventListener('click',cancelGeneration);
+$('cancel-generation-config').addEventListener('click',cancelGeneration);
 $('factory-form').addEventListener('input',()=>{optionsChanged();updateState();persist();});
 $('recipe-select').addEventListener('change',()=>{recipeChanged();persist();});
 for(const id of ['machine','belt','inserter','secondary-inserter','pole'])$(id).addEventListener('change',()=>{equipmentChanged();persist();});

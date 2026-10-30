@@ -40,6 +40,172 @@ async fn json_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 10_000_000).await.unwrap()).unwrap()
 }
 
+async fn wait_generation(app: &Router, id: &str) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let job = json_body(
+            app.clone()
+                .oneshot(request(
+                    "GET",
+                    &format!("/api/generations/{id}"),
+                    Value::Null,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        if job["status"] != "running" {
+            return job;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "generation timed out: {job}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn generation_jobs_publish_snapshots_and_report_invalid_requests() {
+    let app = app();
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/generations",
+            serde_json::to_value(FactoryRequest::new("iron-gear-wheel", 1.0)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let started = json_body(response).await;
+    let id = started["id"].as_str().unwrap();
+    let job = wait_generation(&app, id).await;
+    assert_eq!(job["status"], "complete", "{job}");
+    assert!(job["progress"]["machines"].as_u64().unwrap() > 0);
+    let artifact_id = job["artifact_id"].as_str().unwrap();
+    let artifact = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/artifacts/{artifact_id}"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(artifact["factory"]["request"]["rate"], 1.0);
+    let late_cancel = json_body(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                &format!("/api/generations/{id}/cancel"),
+                json!({}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(late_cancel["status"], "complete");
+
+    let invalid = json_body(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/generations",
+                serde_json::to_value(FactoryRequest::new("iron-gear-wheel", -1.0)).unwrap(),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let failed = wait_generation(&app, invalid["id"].as_str().unwrap()).await;
+    assert_eq!(failed["status"], "error");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("greater than zero")
+    );
+}
+
+#[tokio::test]
+async fn cancelling_running_generation_does_not_publish_and_releases_capacity() {
+    let app = app();
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/generations",
+            serde_json::to_value(FactoryRequest::new("advanced-circuit", 10.0)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let started = json_body(response).await;
+    let id = started["id"].as_str().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let job = json_body(
+            app.clone()
+                .oneshot(request(
+                    "GET",
+                    &format!("/api/generations/{id}"),
+                    Value::Null,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(job["status"], "running");
+        if job["progress"]["stage"] == "power" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..2 {
+        let cancelled = json_body(
+            app.clone()
+                .oneshot(request(
+                    "POST",
+                    &format!("/api/generations/{id}/cancel"),
+                    json!({}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(cancelled["status"], "cancelled");
+        assert!(cancelled["artifact_id"].is_null());
+    }
+    // Subsequent generation still works; the cancelled job adds no history entry.
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/generations",
+                serde_json::to_value(FactoryRequest::new("iron-gear-wheel", 0.5)).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let next = json_body(response).await;
+        assert_eq!(
+            wait_generation(&app, next["id"].as_str().unwrap()).await["status"],
+            "complete"
+        );
+    }
+    let history = json_body(
+        app.oneshot(request("GET", "/api/artifacts", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(history["artifacts"].as_array().unwrap().len(), 2);
+}
+
 #[tokio::test]
 async fn transport_sprites_come_from_the_configured_game_and_missing_art_is_explicit() {
     let without_game = json_body(

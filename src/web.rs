@@ -1,6 +1,7 @@
 //! Loopback-only UI/API. Generated artifacts are immutable snapshots; verification
 //! belongs to their ID, never to the current contents of the browser form.
 
+mod generation;
 mod graphics;
 
 use std::{
@@ -45,6 +46,7 @@ struct AppState {
     entity_sprites: Arc<HashMap<String, std::path::PathBuf>>,
     records: Arc<Mutex<VecDeque<Arc<Artifact>>>>,
     generation_slots: Arc<Semaphore>,
+    generations: Arc<Mutex<VecDeque<Arc<generation::GenerationJob>>>>,
     game_slot: Arc<Semaphore>,
     port: u16,
 }
@@ -326,6 +328,7 @@ impl AppState {
             entity_sprites: Arc::new(entity_graphics.files),
             records: Arc::new(Mutex::new(VecDeque::new())),
             generation_slots: Arc::new(Semaphore::new(2)),
+            generations: Arc::new(Mutex::new(VecDeque::new())),
             game_slot: Arc::new(Semaphore::new(1)),
             port,
         }
@@ -350,6 +353,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/",get(||async{Html(include_str!("../web/index.html"))}))
         .route("/app.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/app.js"))}))
+        .route("/generation.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/generation.js"))}))
         .route("/model.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/model.js"))}))
         .route("/transport.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/transport.js"))}))
         .route("/entities.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/entities.js"))}))
@@ -361,6 +365,9 @@ fn router(state: AppState) -> Router {
         .route("/api/transport-sprites/{name}",get(transport_sprite))
         .route("/api/entity-sprites/{name}",get(entity_sprite))
         .route("/api/artifacts",get(history).post(generate))
+        .route("/api/generations",axum::routing::post(generation::start))
+        .route("/api/generations/{id}",get(generation::status))
+        .route("/api/generations/{id}/cancel",axum::routing::post(generation::cancel))
         .route("/api/artifacts/{id}",get(artifact))
         .route("/api/artifacts/{id}/verification",get(verification).post(verify))
         .route("/api/artifacts/{id}/export/{format}",get(export))
@@ -510,6 +517,14 @@ async fn generate(
         )
         .detail(e)
     })?;
+    let record = record_factory(&s, factory)?;
+    Ok(Json(record_json(&record)?))
+}
+
+fn record_factory(
+    s: &AppState,
+    factory: GeneratedFactory,
+) -> std::result::Result<Arc<Artifact>, ApiError> {
     let record = Arc::new(Artifact {
         id: uuid::Uuid::new_v4().to_string(),
         created_at: now(),
@@ -517,7 +532,6 @@ async fn generate(
         factory,
         job: Mutex::new(Verification::default()),
     });
-    let value = record_json(&record)?;
     let mut records = s.records.lock().map_err(ApiError::internal)?;
     if records.len() >= 20 {
         if let Some(i) = records
@@ -527,8 +541,8 @@ async fn generate(
             records.remove(i);
         }
     }
-    records.push_front(record);
-    Ok(Json(value))
+    records.push_front(record.clone());
+    Ok(record)
 }
 
 fn record_json(r: &Artifact) -> std::result::Result<Value, ApiError> {

@@ -1,6 +1,7 @@
 //! Single-recipe solid production lines. Layout and power use game prototypes.
 
 mod compact_bus;
+mod control;
 mod infrastructure;
 mod infrastructure_check;
 mod input_plan;
@@ -28,6 +29,7 @@ use crate::{
     model::{Entity, Position, Recipe},
 };
 
+pub use control::{GenerationControl, GenerationProgress};
 pub use validate::validate_factory;
 
 pub(crate) fn inserter_observations(
@@ -645,6 +647,15 @@ pub(crate) fn supported_recipe(
 /// Generate a candidate and independently check its geometry, wiring and row topology.
 /// Throughput is conservatively modelled, not game-certified until `verify_in_game`.
 pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<GeneratedFactory> {
+    generate_blueprint_controlled(data, request, &GenerationControl::default())
+}
+
+pub fn generate_blueprint_controlled(
+    data: &GameData,
+    request: &FactoryRequest,
+    control: &GenerationControl,
+) -> Result<GeneratedFactory> {
+    control.check()?;
     ensure!(
         request.rate.is_finite() && request.rate > 0.0,
         "Output rate must be finite and greater than zero"
@@ -878,7 +889,9 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
             machine: [machine.tile_width, machine.tile_height],
             pole: [pole.tile_width, pole.tile_height],
         },
+        control,
         |spec, best_area| {
+            control.update(|p| p.stage = "layout")?;
             let mut doc = BlueprintDocument::new(
                 &data.game_version,
                 format!("Factorium: {} >= {}/s", request.product, request.rate),
@@ -896,6 +909,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                 planned,
             }
             .place(&mut doc, spec);
+            control.check()?;
             let (bus, storage, markers) = infrastructure::place(
                 data,
                 request,
@@ -938,7 +952,8 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                     "Layout already exceeds the best candidate footprint"
                 );
             }
-            let mut power = power::place_and_wire(data, &mut doc, &request.pole, &rows)?;
+            control.update(|p| p.stage = "power")?;
+            let mut power = power::place_and_wire(data, &mut doc, &request.pole, &rows, control)?;
             let demand = |e: &Entity| -> Result<f64> {
                 Ok((stat(e, "max_energy_usage")?
                     + e.prototype
@@ -1068,7 +1083,9 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                 storage,
                 markers,
             };
+            control.update(|p| p.stage = "validation")?;
             validate_factory(data, &factory)?;
+            control.check()?;
             Ok(factory)
         },
     )

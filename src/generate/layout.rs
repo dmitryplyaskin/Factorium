@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 
-use super::GeneratedFactory;
+use super::{GeneratedFactory, GenerationControl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct LayoutSpec {
@@ -13,6 +13,56 @@ pub(super) struct LayoutSpec {
     pub machine_gap: u32,
     /// Empty tile rows between two independent belt/machine bands.
     pub row_gap: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn large_dimensions() -> Dimensions {
+        Dimensions {
+            count: 739,
+            max_per_row: 39,
+            legacy_per_row: 8,
+            input_belts: 3,
+            allow_paired: false,
+            machine_limit: None,
+            width_limit: None,
+            machine: [3, 3],
+            pole: [1, 1],
+        }
+    }
+
+    #[test]
+    fn starts_with_compact_templates_and_keeps_legacy_fallback() {
+        let dimensions = large_dimensions();
+        let legacy = dimensions.legacy();
+        let smallest = dimensions.candidates()[0];
+        let mut attempted = Vec::new();
+        assert!(
+            optimize(dimensions, &GenerationControl::default(), |spec, _| {
+                attempted.push(spec);
+                anyhow::bail!("infeasible candidate")
+            })
+            .is_err()
+        );
+        assert_eq!(attempted[0], smallest);
+        assert_ne!(attempted[0], legacy);
+        assert!(attempted.contains(&legacy));
+    }
+
+    #[test]
+    fn cancellation_is_not_swallowed_as_an_infeasible_candidate() {
+        let control = GenerationControl::default();
+        let mut attempts = 0;
+        let result = optimize(large_dimensions(), &control, |_, _| {
+            attempts += 1;
+            control.cancel();
+            anyhow::bail!("Generation cancelled")
+        });
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(attempts, 1);
+    }
 }
 
 pub(super) struct Dimensions {
@@ -165,20 +215,29 @@ impl Score {
 
 pub(super) fn optimize(
     dimensions: Dimensions,
+    control: &GenerationControl,
     mut build_and_validate: impl FnMut(LayoutSpec, Option<u64>) -> Result<GeneratedFactory>,
 ) -> Result<GeneratedFactory> {
     let legacy = dimensions.legacy();
-    // Preserve the former template as a fallback and a quality upper bound.
-    // Failure of that template must not exclude a feasible compact candidate.
-    let (mut best, mut failure) = match build_and_validate(legacy, None) {
-        Ok(factory) => (Some((Score::of(&factory), factory)), None),
-        Err(error) => (None, Some(error)),
-    };
-    for spec in dimensions.candidates() {
-        if spec == legacy
-            || best
-                .as_ref()
-                .is_some_and(|(score, _)| dimensions.production_area(spec) > score.area)
+    let mut candidates = dimensions.candidates();
+    if !candidates.contains(&legacy) {
+        candidates.push(legacy);
+    }
+    candidates.sort_by_key(|&s| (dimensions.production_area(s), s));
+    control.update(|p| {
+        p.machines = dimensions.count;
+        p.candidates = candidates.len();
+    })?;
+    // Start with compact templates. The legacy layout remains a candidate, but
+    // need not build an expensive sprawling power network just to set a bound.
+    let mut best: Option<(Score, GeneratedFactory)> = None;
+    let mut failure = None;
+    for spec in candidates {
+        control.check()?;
+        control.update(|p| p.candidate += 1)?;
+        if best
+            .as_ref()
+            .is_some_and(|(score, _)| dimensions.production_area(spec) > score.area)
         {
             continue;
         }
@@ -196,6 +255,7 @@ pub(super) fn optimize(
             }
         }
     }
+    control.check()?;
     best.map(|(_, factory)| factory).ok_or_else(|| {
         failure
             .expect("at least the legacy candidate was attempted")

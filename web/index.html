@@ -80,6 +80,7 @@
             </details><div class="config-footer"><div class="recipe-flow"><img id="input-icon" alt=""><span id="input-label">Сырьё</span><svg><use href="#i-arrow"/></svg><span id="output-label">Продукт</span></div><p>Электричество подводится извне. Столбы и провода входят в чертёж.</p><button id="generate-button" type="submit" class="button primary full-width"><svg><use href="#i-grid"/></svg><span>Построить чертёж</span></button></div>
           </fieldset>
         </form>
+        <button id="cancel-generation-config" type="button" class="button secondary full-width" hidden>Отменить генерацию</button>
         <p id="generation-error" class="inline-error" role="alert" hidden></p>
       </aside>
 
@@ -90,7 +91,7 @@
             <svg id="factory-underlay" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 60 25" preserveAspectRatio="none"><defs><pattern id="grid" width="1" height="1" patternUnits="userSpaceOnUse"><path d="M 1 0 L 0 0 0 1" fill="none" stroke="#2a3440" stroke-width="0.025"/></pattern></defs><g id="underlay"></g></svg>
             <svg id="factory-canvas" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Схема производственной линии" viewBox="0 0 60 25" preserveAspectRatio="none"><g id="scene"></g></svg>
             <div id="canvas-empty" class="canvas-empty"><span class="empty-illustration"><svg><use href="#i-grid"/></svg></span><strong>Готовим рабочее пространство</strong><span>Читаем рецепты из игрового каталога</span></div>
-            <div id="canvas-busy" class="canvas-busy" hidden><span class="spinner"></span>Рассчитываем линию и электросеть…</div>
+            <div id="canvas-busy" class="canvas-busy" hidden><span class="spinner" aria-hidden="true"></span><span id="generation-progress" role="status">Подготавливаем расчёт…</span><button id="cancel-generation" type="button" class="button secondary">Отменить генерацию</button></div>
             <div id="entity-inspector" class="entity-inspector hud" hidden><div><span id="inspector-kind"></span><button id="close-inspector" class="icon-button" aria-label="Закрыть информацию о сущности"><svg><use href="#i-close"/></svg></button></div><strong id="inspector-name"></strong><span id="inspector-detail" class="code-caption"></span></div>
             <div class="canvas-legend hud" aria-label="Обозначения"><span><i class="legend-machine"></i>Машины</span><span><i class="legend-belt"></i>Ленты</span><span><i class="legend-inserter"></i>Манипуляторы</span><span><i class="legend-pole"></i>Столбы</span></div>
             <div class="zoom-controls hud"><button id="zoom-out" class="icon-button" aria-label="Уменьшить масштаб"><svg><use href="#i-minus"/></svg></button><output id="zoom-level" aria-label="Масштаб">100%</output><button id="zoom-in" class="icon-button" aria-label="Увеличить масштаб"><svg><use href="#i-plus"/></svg></button><span></span><button id="zoom-fit" class="icon-button" aria-label="Вписать схему целиком"><svg><use href="#i-fit"/></svg></button></div>

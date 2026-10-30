@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
-use super::{PowerPlan, ProductionRow, entity, stat};
+use super::{GenerationControl, PowerPlan, ProductionRow, entity, stat};
 use crate::{
     GameData,
     blueprint::{BlueprintDocument, BlueprintEntity},
@@ -172,13 +172,27 @@ fn wire_forest(
     reach: f64,
 ) -> (Components, Vec<(usize, usize)>) {
     let mut candidates = Vec::new();
+    let mut buckets: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    let bucket_size = reach + 1e-8;
     for i in 0..selected.len() {
-        for j in i + 1..selected.len() {
-            let d = distance(pole_position(selected[i], p), pole_position(selected[j], p));
-            if d <= reach + 1e-8 {
-                candidates.push((d, i, j));
+        let tile = selected[i];
+        let bucket = (
+            (f64::from(tile.0) / bucket_size).floor() as i32,
+            (f64::from(tile.1) / bucket_size).floor() as i32,
+        );
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if let Some(neighbors) = buckets.get(&(bucket.0 + dx, bucket.1 + dy)) {
+                    for &j in neighbors {
+                        let d = distance(pole_position(tile, p), pole_position(selected[j], p));
+                        if d <= reach + 1e-8 {
+                            candidates.push((d, j, i));
+                        }
+                    }
+                }
             }
         }
+        buckets.entry(bucket).or_default().push(i);
     }
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
     let mut components = Components::new(selected.len());
@@ -199,7 +213,9 @@ pub(crate) fn place_and_wire(
     doc: &mut BlueprintDocument,
     name: &str,
     rows: &[ProductionRow],
+    control: &GenerationControl,
 ) -> Result<PowerPlan> {
+    control.check()?;
     let p = entity(data, name)?;
     ensure!(
         p.prototype.prototype_type == "electric-pole",
@@ -239,6 +255,7 @@ pub(crate) fn place_and_wire(
     );
     let mut candidates = Vec::new();
     for y in min_y..=max_y {
+        control.check()?;
         for x in min_x..=max_x {
             if (0..p.tile_width as i32)
                 .all(|dx| (0..p.tile_height as i32).all(|dy| !occupied.contains(&(x + dx, y + dy))))
@@ -257,6 +274,7 @@ pub(crate) fn place_and_wire(
     let mut covers = vec![Vec::new(); candidates.len()];
     let mut consumer_candidates = vec![Vec::new(); consumers.len()];
     for (i, (e, proto)) in consumers.iter().enumerate() {
+        control.check()?;
         let box_ = proto.collision_box;
         let x0 = (e.position.x + box_.left_top.x - radius - f64::from(p.tile_width) / 2.0).floor()
             as i32;
@@ -293,6 +311,7 @@ pub(crate) fn place_and_wire(
     let mut uncovered = vec![true; consumers.len()];
     let mut remaining = consumers.len();
     while remaining > 0 {
+        control.check()?;
         let (_, score, Reverse(index)) = loop {
             let entry=heap.pop().context("This pole cannot cover all consumers in the row template; select a wider supply area")?;
             if entry.1 > 0 && scores[entry.2.0] == entry.1 {
@@ -328,6 +347,7 @@ pub(crate) fn place_and_wire(
     // Join disconnected coverage islands by searching for relay positions, rather
     // than assuming that overlapping supply areas imply a wired network.
     let final_edges = loop {
+        control.check()?;
         let (mut components, edges) = wire_forest(&selected, p, reach);
         let root = components.root(0);
         if (0..selected.len()).all(|i| components.root(i) == root) {
@@ -346,8 +366,22 @@ pub(crate) fn place_and_wire(
             }
         }
         let r = reach.floor() as i32;
+        // Spatially mark overlapping placements once, rather than scanning all
+        // selected poles for every edge explored by the relay search.
+        let selected_tiles: HashSet<_> = selected.iter().copied().collect();
+        let mut blocked = HashSet::new();
+        for &(x, y) in &selected {
+            for dy in -(p.tile_height as i32 - 1)..p.tile_height as i32 {
+                for dx in -(p.tile_width as i32 - 1)..p.tile_width as i32 {
+                    if dx != 0 || dy != 0 {
+                        blocked.insert((x + dx, y + dy));
+                    }
+                }
+            }
+        }
         let mut found = None;
         while let Some(index) = queue.pop_front() {
+            control.check()?;
             if goals.contains(&index) {
                 found = Some(index);
                 break;
@@ -365,9 +399,7 @@ pub(crate) fn place_and_wire(
                     let Some(&next_index) = lookup.get(&next) else {
                         continue;
                     };
-                    if parents.contains_key(&next_index)
-                        || selected.iter().any(|&s| s != next && overlaps(s, next, p))
-                    {
+                    if parents.contains_key(&next_index) || blocked.contains(&next) {
                         continue;
                     }
                     parents.insert(next_index, index);
@@ -380,7 +412,7 @@ pub(crate) fn place_and_wire(
         let mut added = 0;
         while parents[&index] != index {
             let tile = candidates[index];
-            if !selected.contains(&tile) {
+            if !selected_tiles.contains(&tile) {
                 ensure!(
                     !selected.iter().any(|&s| overlaps(s, tile, p)),
                     "Relay pole would overlap another pole"
@@ -466,4 +498,50 @@ pub(crate) fn place_and_wire(
         connection_position: pole_position(selected[connection], p),
         installed_power_watts: 0.0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spatial_wire_search_preserves_brute_force_edges_at_negative_coordinates() {
+        let box_ =
+            serde_json::json!({"left_top":{"x":-0.4,"y":-0.4},"right_bottom":{"x":0.4,"y":0.4}});
+        let pole: Entity = serde_json::from_value(serde_json::json!({
+            "name":"pole","type":"electric-pole","hidden":false,
+            "tile_width":1,"tile_height":1,"collision_box":box_,"selection_box":box_,
+            "fluid_boxes":[],"quality_stats":{}
+        }))
+        .unwrap();
+        let selected: Vec<_> = (-5..=5)
+            .flat_map(|x| (-4..=4).map(move |y| (x * 3, y * 4)))
+            .collect();
+        for reach in [3.0 - 1e-9, 7.5, 12.0] {
+            let mut candidates = Vec::new();
+            for i in 0..selected.len() {
+                for j in i + 1..selected.len() {
+                    let d = distance(
+                        pole_position(selected[i], &pole),
+                        pole_position(selected[j], &pole),
+                    );
+                    if d <= reach + 1e-8 {
+                        candidates.push((d, i, j));
+                    }
+                }
+            }
+            candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+            let mut components = Components::new(selected.len());
+            let mut degree = vec![0; selected.len()];
+            let mut expected = Vec::new();
+            for (_, i, j) in candidates {
+                if degree[i] < 5 && degree[j] < 5 && components.join(i, j) {
+                    degree[i] += 1;
+                    degree[j] += 1;
+                    expected.push((i, j));
+                }
+            }
+            assert_eq!(wire_forest(&selected, &pole, reach).1, expected);
+        }
+    }
 }
