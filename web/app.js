@@ -1,6 +1,6 @@
 import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputBelts, inputRequirements, recipeIngredients, itemGroups, groupInfo, subgroupLabel, recipeGroup, recipeTitle, filterRecipes } from './model.js';
 import { transportLayout, transportSymbols, transportTile, transportDevice, transportPalette, directionLabel } from './transport.js';
-import { entitySymbols, entitySprite, wirePoint } from './entities.js';
+import { entitySymbols, entitySprite, wirePoint, inputMarkerBadge } from './entities.js';
 
 const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -267,10 +267,6 @@ function drawFactory(f) {
     if(native){
       group.append(native.body,native.hitbox);shadowGroup.append(native.shadow);armGroup.append(native.arm);
       x0=Math.min(x0,native.bounds.left);y0=Math.min(y0,native.bounds.top);x1=Math.max(x1,native.bounds.right);y1=Math.max(y1,native.bounds.bottom);
-      if(e.name==='constant-combinator'){
-        const marker=f.markers?.find(m=>m.entity_number===e.entity_number);
-        if(marker)group.append(svg('image',{href:iconURL(marker.item),x:x-.22,y:y-.22,width:.44,height:.44,'pointer-events':'none'}));
-      }
     } else if(e.name===f.request.machine){
       group.append(svg('rect',{class:'entity-body',x:x-w/2+.06,y:y-h/2+.06,width:w-.12,height:h-.12,rx:.14,fill:'#24453e',stroke:'#70ad99','stroke-width':.06}));
       const size=Math.min(w,h)*.64;group.append(svg('image',{href:iconURL(e.name),x:x-size/2,y:y-size/2,width:size,height:size,'pointer-events':'none'}));
@@ -279,9 +275,8 @@ function drawFactory(f) {
     } else if(e.name===f.bus?.splitter || e.name===f.bus?.underground){
       group.append(...transportDevice(svg,e,{splitter:f.bus.splitter,belt:f.request.belt,w,h,sprites:state.catalog.transport_sprites}));
     } else if(e.name==='constant-combinator'){
-      const marker=f.markers?.find(m=>m.entity_number===e.entity_number);
       group.append(svg('rect',{class:'entity-body',x:x-.45,y:y-.45,width:.9,height:.9,rx:.08,fill:'#3c4e63',stroke:'#b6c9e2','stroke-width':.06}));
-      group.append(svg('image',{href:iconURL(marker?.item || e.name),x:x-.35,y:y-.35,width:.7,height:.7,'pointer-events':'none'}));
+      group.append(svg('image',{href:iconURL(e.name),x:x-.35,y:y-.35,width:.7,height:.7,'pointer-events':'none'}));
     } else if(e.name===f.request.output_chest){
       group.append(svg('rect',{class:'entity-body',x:x-.44,y:y-.44,width:.88,height:.88,rx:.06,fill:'#5d4839',stroke:'#d6aa82','stroke-width':.06}));
       group.append(svg('image',{href:iconURL(e.name),x:x-.39,y:y-.39,width:.78,height:.78,'pointer-events':'none'}));
@@ -313,6 +308,24 @@ function drawFactory(f) {
   }
   const p=f.power.connection_position;
   portsGroup.append(svg('circle',{cx:p.x,cy:p.y,r:.65,fill:'none',stroke:'#c9b5ec','stroke-width':.08,'stroke-dasharray':'.15 .12'}));
+  const physicalInputs=inputBelts(f),materials=inputPorts(f);
+  physicalInputs.forEach((input,line)=>{
+    const resources=materials.filter(port=>port.entity_number===input.entity_number);
+    resources.forEach((port,index)=>{
+      const marker=f.markers?.find(marker=>marker.target_entity===port.entity_number && marker.item===port.item);
+      // Screen annotations also work when combinators are omitted from the blueprint.
+      // Shared belts retain a separate sign for each material and its lane.
+      const position=marker?byID.get(marker.entity_number).position:input.direction===8?
+        {x:input.position.x+(index-(resources.length-1)/2)*1.1,y:input.position.y-3.5}:
+        {x:input.position.x-5.2-(resources.length-1-index)*1.1,y:input.position.y+.5};
+      const sign=marker || {entity_number:port.entity_number,item:port.item,rate:port.rate};
+      const lane=port.lanes==='left'?' · левая полоса':port.lanes==='right'?' · правая полоса':'';
+      const caption=`Вход ${line+1} · ${label(port.item)} · ${number(port.rate)}/с${lane}`;
+      portsGroup.append(inputMarkerBadge(svg,sign,position,iconURL(port.item),caption));
+      x0=Math.min(x0,position.x-.5);x1=Math.max(x1,position.x+.5);
+      y0=Math.min(y0,position.y-1);y1=Math.max(y1,position.y);
+    });
+  });
   scene.append(powerGroup,tunnelGroup,transportGroup,shadowGroup,bodyGroup,armGroup,wireGroup,portsGroup);
   const bounds={x:x0-8,y:y0-3,w:x1-x0+16,h:y1-y0+6};
   state.fitted=bounds;fit();
@@ -361,6 +374,14 @@ function inspect(id) {
   else if(e.name===f.request.machine)detail+=`\n${f.recipe}`;
   if(e.name===f.request.belt || e.name===f.bus?.splitter || e.name===f.bus?.underground)detail+=`\nНаправление: ${directionLabel(e.direction)}`;
   if(e.name===f.bus?.underground)detail+=e.type==='input'?'\nВход в подземный участок':'\nВыход на поверхность';
+  const inputMaterials=inputPorts(f).filter(port=>port.entity_number===id);
+  if(inputMaterials.length){
+    const line=inputBelts(f).findIndex(port=>port.entity_number===id)+1;
+    for(const port of inputMaterials){
+      const lane=port.lanes==='left'?' · левая полоса':port.lanes==='right'?' · правая полоса':'';
+      detail+=`\nВход ${line}: ${label(port.item)} · ${number(port.rate)}/с${lane}`;
+    }
+  }
   const marker=f.markers?.find(m=>m.entity_number===id);if(marker)detail+=`\n${label(marker.item)} · ${number(marker.rate)}/с · вход #${marker.target_entity}`;
   text('inspector-detail',detail);$('entity-inspector').hidden=false;
 }

@@ -31,6 +31,17 @@ export function wirePoint(e,graphics) {
   return {x:e.position.x+offset[0],y:e.position.y+offset[1]};
 }
 
+// Like the game's Alt view, resource signs are annotations above world art.
+// Keep them separate from combinator sprites, shadows, arms and copper wires.
+export function inputMarkerBadge(svg,marker,position,icon,caption) {
+  const badge=svg('g',{class:'input-marker-badge','data-entity':marker.entity_number,'data-item':marker.item,
+    transform:`translate(${position.x} ${position.y-.5})`});
+  badge.append(svg('title',{},caption));
+  badge.append(svg('rect',{class:'entity-body',x:-.48,y:-.48,width:.96,height:.96,rx:.1,fill:'#17232e',stroke:'#839cb4','stroke-width':.045}));
+  badge.append(svg('image',{href:icon,x:-.4,y:-.4,width:.8,height:.8,'pointer-events':'none'}));
+  return badge;
+}
+
 export function inserterPose(e,graphics) {
   const arm=definition(e,graphics)?.arm;
   if(!arm)return null;
