@@ -876,7 +876,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                     "Layout already exceeds the best candidate footprint"
                 );
             }
-            let mut power = power::place_and_wire(data, &mut doc, &request.pole)?;
+            let mut power = power::place_and_wire(data, &mut doc, &request.pole, &rows)?;
             let demand = |e: &Entity| -> Result<f64> {
                 Ok((stat(e, "max_energy_usage")?
                     + e.prototype

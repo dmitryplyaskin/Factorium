@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
-use super::{PowerPlan, entity, stat};
+use super::{PowerPlan, ProductionRow, entity, stat};
 use crate::{
     GameData,
     blueprint::{BlueprintDocument, BlueprintEntity},
@@ -62,6 +62,80 @@ fn pole_position(tile: (i32, i32), p: &Entity) -> Position {
 
 fn overlaps(a: (i32, i32), b: (i32, i32), p: &Entity) -> bool {
     (a.0 - b.0).abs() < (p.tile_width as i32) && (a.1 - b.1).abs() < (p.tile_height as i32)
+}
+
+/// Prefer the same repeating columns on both inserter lines of a row. Keep
+/// edge slots so a shortened last interval never leaves the end hands unpowered.
+/// Larger poles and machines without an inserter gap use the general planner.
+fn regular_candidates(
+    doc: &BlueprintDocument,
+    rows: &[ProductionRow],
+    machine: &Entity,
+    pole: &Entity,
+    lookup: &HashMap<(i32, i32), usize>,
+    covers: &[Vec<usize>],
+    reach: f64,
+) -> Vec<bool> {
+    let mut preferred = vec![false; covers.len()];
+    if pole.tile_width != 1 || pole.tile_height != 1 || machine.tile_width < 3 {
+        return preferred;
+    }
+    let w = f64::from(machine.tile_width);
+    let h = f64::from(machine.tile_height);
+    for row in rows {
+        let first = &doc.blueprint.entities[(row.machines[0] - 1) as usize];
+        for y in [first.position.y - h / 2.0 - 1.0, first.position.y + h / 2.0] {
+            let slots: Vec<_> = row
+                .machines
+                .iter()
+                .filter_map(|&id| {
+                    let e = &doc.blueprint.entities[(id - 1) as usize];
+                    let x = (e.position.x - w / 2.0) as i32 + (machine.tile_width as i32 - 1) / 2;
+                    lookup.get(&(x, y as i32)).map(|&index| (x, index))
+                })
+                .collect();
+            if slots.is_empty() {
+                continue;
+            }
+            let targets: HashSet<_> = slots
+                .iter()
+                .flat_map(|&(_, i)| covers[i].iter().copied())
+                .collect();
+            let pitch = slots
+                .windows(2)
+                .map(|s| s[1].0 - s[0].0)
+                .min()
+                .unwrap_or(1)
+                .max(1);
+            let max_stride = ((reach / f64::from(pitch)).floor() as usize).clamp(1, slots.len());
+            let mut best: Vec<_> = (0..slots.len()).collect();
+            for stride in 2..=max_stride {
+                for phase in 0..stride {
+                    let pattern: Vec<_> = (0..slots.len())
+                        .filter(|&i| i == 0 || i + 1 == slots.len() || i % stride == phase)
+                        .collect();
+                    if pattern.len() >= best.len()
+                        || pattern
+                            .windows(2)
+                            .any(|s| f64::from(slots[s[1]].0 - slots[s[0]].0) > reach + 1e-8)
+                    {
+                        continue;
+                    }
+                    let covered: HashSet<_> = pattern
+                        .iter()
+                        .flat_map(|&i| covers[slots[i].1].iter().copied())
+                        .collect();
+                    if covered.len() == targets.len() {
+                        best = pattern;
+                    }
+                }
+            }
+            for i in best {
+                preferred[slots[i].1] = true;
+            }
+        }
+    }
+    preferred
 }
 
 struct Components {
@@ -124,6 +198,7 @@ pub(crate) fn place_and_wire(
     data: &GameData,
     doc: &mut BlueprintDocument,
     name: &str,
+    rows: &[ProductionRow],
 ) -> Result<PowerPlan> {
     let p = entity(data, name)?;
     ensure!(
@@ -202,20 +277,25 @@ pub(crate) fn place_and_wire(
             }
         }
     }
+    let machine = entity(
+        data,
+        &doc.blueprint.entities[(rows[0].machines[0] - 1) as usize].name,
+    )?;
+    let preferred = regular_candidates(doc, rows, machine, p, &lookup, &covers, reach);
     let mut scores: Vec<usize> = covers.iter().map(Vec::len).collect();
     let mut heap: BinaryHeap<_> = scores
         .iter()
         .enumerate()
         .filter(|&(_, score)| *score > 0)
-        .map(|(i, &score)| (score, Reverse(i)))
+        .map(|(i, &score)| (preferred[i], score, Reverse(i)))
         .collect();
     let mut selected = Vec::new();
     let mut uncovered = vec![true; consumers.len()];
     let mut remaining = consumers.len();
     while remaining > 0 {
-        let (score, Reverse(index)) = loop {
+        let (_, score, Reverse(index)) = loop {
             let entry=heap.pop().context("This pole cannot cover all consumers in the row template; select a wider supply area")?;
-            if entry.0 > 0 && scores[entry.1.0] == entry.0 {
+            if entry.1 > 0 && scores[entry.2.0] == entry.1 {
                 break entry;
             }
         };
@@ -239,7 +319,7 @@ pub(crate) fn place_and_wire(
                 if scores[other] > 0 {
                     scores[other] -= 1;
                     if scores[other] > 0 {
-                        heap.push((scores[other], Reverse(other)));
+                        heap.push((preferred[other], scores[other], Reverse(other)));
                     }
                 }
             }

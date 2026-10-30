@@ -7,6 +7,53 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use factorium::{FactoryRequest, generate_blueprint, validate_factory};
 
 #[test]
+fn small_poles_follow_matching_regular_lines_between_furnace_inserters() -> Result<()> {
+    let mut raw = common::catalog_value();
+    raw["recipes"]["iron-plate"]["energy"] = json!(3.2);
+    let data = serde_json::from_value(raw)?;
+    let mut r = FactoryRequest::new("iron-plate", 5.0);
+    r.machine = "electric-furnace".into();
+    r.belt = "fast-transport-belt".into();
+    r.common_input = true;
+    r.reverse_output = true;
+    r.input_markers = true;
+    let f = generate_blueprint(&data, &r)?;
+    validate_factory(&data, &f)?;
+    assert_eq!(f.machine_count, 9);
+    assert_eq!(f.rows.len(), 1);
+    assert_eq!(f.power.pole_count, 10);
+    let entities = &f.document.blueprint.entities;
+    let mut bands = std::collections::BTreeMap::<i32, Vec<f64>>::new();
+    for p in entities.iter().filter(|e| e.name == r.pole) {
+        for dx in [-1.0, 1.0] {
+            assert!(
+                entities.iter().any(|e| e.name == r.inserter
+                    && e.position.y == p.position.y
+                    && e.position.x == p.position.x + dx),
+                "Every pole must sit between the two hands, including the row ends"
+            );
+        }
+        bands
+            .entry(p.position.y.floor() as i32)
+            .or_default()
+            .push(p.position.x);
+    }
+    assert_eq!(bands.len(), 2);
+    for xs in bands.values_mut() {
+        xs.sort_by(f64::total_cmp);
+        assert_eq!(xs.len(), 5);
+        assert!(xs.windows(2).all(|s| s[1] - s[0] == 6.0));
+    }
+    let mut bands = bands.values();
+    assert_eq!(
+        bands.next(),
+        bands.next(),
+        "Both sides must use matching columns"
+    );
+    Ok(())
+}
+
+#[test]
 fn reverse_output_keeps_ports_and_storage_on_the_input_side() -> Result<()> {
     let data = common::catalog();
     for product in ["iron-gear-wheel", "electronic-circuit"] {
@@ -452,7 +499,10 @@ fn adapts_pole_clearance_and_row_length_to_equipment_and_recipe() -> Result<()> 
     validate_factory(&data, &big)?;
     // A 2x2 pole with short supply reach needs actual clearance. Dense layouts
     // suitable for a 1x1 pole must not be accepted merely for their small area.
-    assert!(footprint(&big)[0] > footprint(&small)[0]);
+    // The extra clearance may be arranged horizontally or in additional rows.
+    let [sw, sh] = footprint(&small);
+    let [bw, bh] = footprint(&big);
+    assert!(bw * bh > sw * sh);
 
     let mut request = FactoryRequest::new("steel-plate", 1.5);
     request.machine = "electric-furnace".into();

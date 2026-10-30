@@ -26,6 +26,15 @@ fn measures_blueprint_import_throughput_and_power_in_the_real_game() -> Result<(
     cases.push(FactoryRequest::new("iron-gear-wheel", 10.0));
     cases.push(FactoryRequest::new("iron-gear-wheel", 12.0));
     cases.push(FactoryRequest::new("iron-gear-wheel", 0.5));
+    // Regression for the visible 5 plates/s example: small poles should fit
+    // inside both inserter lines without detached poles above or at the ends.
+    let mut r = FactoryRequest::new("iron-plate", 5.0);
+    r.machine = "electric-furnace".into();
+    r.belt = "fast-transport-belt".into();
+    r.common_input = true;
+    r.reverse_output = true;
+    r.input_markers = true;
+    cases.push(r);
     for pole in [
         "small-electric-pole",
         "medium-electric-pole",
