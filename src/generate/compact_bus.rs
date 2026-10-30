@@ -4,21 +4,20 @@ use std::collections::HashSet;
 use anyhow::{Context, Result, ensure};
 
 use super::{
-    BeltPort, BusLine, FactoryRequest, InputBus, ProductionRow, entity,
-    infrastructure::{matching, outputs},
+    BeltPort, BusLine, FactoryRequest, InputBus, ProductionRow, entity, infrastructure::matching,
     power::tiles,
 };
 use crate::{GameData, blueprint::BlueprintDocument};
 
-struct Router<'a> {
-    doc: &'a mut BlueprintDocument,
+pub(super) struct Router<'a> {
+    pub doc: &'a mut BlueprintDocument,
     belt: &'a str,
     underground: &'a str,
     reach: i32,
     occupied: HashSet<(i32, i32)>,
 }
 impl<'a> Router<'a> {
-    fn new(
+    pub fn new(
         data: &GameData,
         doc: &'a mut BlueprintDocument,
         belt: &'a str,
@@ -39,7 +38,7 @@ impl<'a> Router<'a> {
             occupied,
         })
     }
-    fn belt(&mut self, x: i32, y: i32, direction: u8) -> Result<u32> {
+    pub fn belt(&mut self, x: i32, y: i32, direction: u8) -> Result<u32> {
         ensure!(
             self.occupied.insert((x, y)),
             "Compact route overlaps a transport entity at ({x}, {y})"
@@ -64,7 +63,7 @@ impl<'a> Router<'a> {
     }
     /// A straight two-lane path. Tunnels cross occupied runs, never side-load
     /// another conveyor, and always surface before the final turn/port.
-    fn run(
+    pub fn run(
         &mut self,
         start: (i32, i32),
         end: (i32, i32),
@@ -72,6 +71,7 @@ impl<'a> Router<'a> {
         final_direction: u8,
     ) -> Result<u32> {
         let (dx, dy) = match direction {
+            0 => (0, -1),
             4 => (1, 0),
             8 => (0, 1),
             12 => (-1, 0),
@@ -94,7 +94,7 @@ impl<'a> Router<'a> {
                                 .occupied
                                 .contains(&(tile.0 + (d + 1) * dx, tile.1 + (d + 1) * dy))
                     })
-                    .context("Underground reach cannot cross the compact corridor")?;
+                    .with_context(|| format!("Underground reach cannot cross the compact corridor from {tile:?} towards {end:?}"))?;
                 self.tunnel(tile.0, tile.1, direction, "input")?;
                 last = self.tunnel(
                     tile.0 + distance * dx,
@@ -117,6 +117,23 @@ impl<'a> Router<'a> {
             }
         }
         Ok(last)
+    }
+    pub fn splitter(&mut self, x: i32, y: i32, direction: u8, name: &str) -> Result<u32> {
+        let (dx, dy) = if matches!(direction, 4 | 12) {
+            (0, 1)
+        } else {
+            (1, 0)
+        };
+        ensure!(
+            self.occupied.insert((x, y)) && self.occupied.insert((x + dx, y + dy)),
+            "Output splitter overlaps another route"
+        );
+        Ok(self.doc.add(
+            name,
+            f64::from(x) + 0.5 + f64::from(dx) / 2.0,
+            f64::from(y) + 0.5 + f64::from(dy) / 2.0,
+            direction,
+        ))
     }
     /// Both halves share the same next column at different heights. The near
     /// half ends before the far half starts, so its tracks can be reused.
@@ -195,7 +212,16 @@ pub(super) fn place(
         1
     };
     let right = if request.reverse_output {
-        -5 - outputs(rows).len() as i32
+        // Lane balancers and collectors stay beside the rows, inside the bus.
+        let groups = super::output_bus::groups(rows, belt_rate);
+        let balance = groups
+            .iter()
+            .any(|g| super::output_bus::needs_balance(rows, g, belt_rate));
+        if groups.len() == 1 && groups[0].len() == 1 {
+            -5
+        } else {
+            -7 - if balance { 8 } else { 0 } - 4 * groups.len() as i32
+        }
     } else {
         -5
     };
@@ -222,36 +248,55 @@ pub(super) fn place(
             ));
         }
     }
-    let collector_space = if request.reverse_output && ingredients == 3 {
-        outputs(rows).len() as i32
-    } else {
-        0
-    };
-    let west = groups.iter().map(|g| g.0).min().unwrap() - 3 - collector_space;
+    let west = groups.iter().map(|g| g.0).min().unwrap() - 3;
     let top = rows
         .iter()
         .flat_map(ProductionRow::input_ports)
         .map(|p| p.position.y.floor() as i32)
         .min()
-        .unwrap()
-        - groups.len() as i32;
-    let mut order: Vec<_> = (0..groups.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(groups[i].0));
-    let mut source_y = vec![0; groups.len()];
-    for (rank, i) in order.into_iter().enumerate() {
-        source_y[i] = top + rank as i32;
-    }
+        .unwrap();
+    groups.sort_by_key(|(x, ports)| (ports[0].position.y.floor() as i32, std::cmp::Reverse(*x)));
+    // Headers start inside the production height. Reserve row belt levels and
+    // the second tile of local splitter branches; cross only their thin trunks.
+    let blocked: HashSet<_> = rows
+        .iter()
+        .flat_map(|row| {
+            row.input_ports()
+                .flat_map(|p| {
+                    let y = p.position.y.floor() as i32;
+                    [y, y + 1]
+                })
+                .chain([row.output.position.y.floor() as i32])
+        })
+        .collect();
     let mut route = Router::new(data, doc, &request.belt, &underground.prototype.name)?;
     let mut lines = Vec::new();
     let mut outlets = Vec::new();
+    let mut y = top;
     for (i, (x, ports)) in groups.iter().enumerate() {
+        if i > 0 {
+            y += 1;
+            while blocked.contains(&y) {
+                y += 1;
+            }
+        }
         let begin = route.doc.blueprint.entities.len();
         let source = begin as u32 + 1;
-        let y = source_y[i];
-        route.run((west, y), (*x, y), 4, 8)?;
         let first_y = ports[0].position.y.floor() as i32;
-        for ty in y + 1..first_y {
-            route.belt(*x, ty, 8)?;
+        if y == first_y {
+            route.run((west, y), (x - 1, y), 4, 4)?;
+        } else {
+            let direction = if y < first_y { 8 } else { 0 };
+            route.run((west, y), (*x, y), 4, direction)?;
+            if y < first_y {
+                for ty in y + 1..first_y {
+                    route.belt(*x, ty, direction)?;
+                }
+            } else {
+                for ty in (first_y + 1..y).rev() {
+                    route.belt(*x, ty, direction)?;
+                }
+            }
         }
         let mut leaves = Vec::new();
         route.branch(*x, ports, &splitter.prototype.name, &mut leaves)?;
@@ -308,72 +353,6 @@ pub(super) fn place(
         splitter: splitter.prototype.name.clone(),
         underground: underground.prototype.name.clone(),
         lines,
+        output_entities: Vec::new(),
     })
-}
-
-pub(super) fn collect_outputs(
-    data: &GameData,
-    request: &FactoryRequest,
-    rows: &mut [ProductionRow],
-    doc: &mut BlueprintDocument,
-    bus: &InputBus,
-) -> Result<()> {
-    let ports = outputs(rows);
-    if ports.len() == 1 && !request.reverse_output {
-        return Ok(());
-    }
-    let mut route = Router::new(data, doc, &request.belt, &bus.underground)?;
-    let step = if request.reverse_output { -1 } else { 1 };
-    let west = bus
-        .lines
-        .iter()
-        .map(|l| l.source.position.x.floor() as i32)
-        .min()
-        .unwrap();
-    let right = route.occupied.iter().map(|p| p.0).max().unwrap();
-    let bottom = route.occupied.iter().map(|p| p.1).max().unwrap() + 2;
-    // Keep an empty tile after east-facing input belt ends so raw ingredients
-    // cannot side-load onto the output collector of a full-width lower row.
-    let column = if request.reverse_output {
-        if rows[0].input_ports().count() == 3 {
-            west + ports.len() as i32 + 1
-        } else {
-            -3
-        }
-    } else {
-        right + 2
-    };
-    let boundary = if request.reverse_output {
-        west
-    } else {
-        column + ports.len() as i32 + 2
-    };
-    let spacing = if request.output_chest.is_some() { 6 } else { 1 };
-    for (i, port) in ports.iter().enumerate() {
-        let x = port.position.x.floor() as i32;
-        let y = port.position.y.floor() as i32;
-        let end_x = column + step * (ports.len() - 1 - i) as i32;
-        let end_y = bottom + i as i32 * spacing;
-        let last = if ports.len() == 1 && request.reverse_output {
-            route.run((x - 1, y), (boundary, y), 12, 12)?
-        } else {
-            route.run((x + step, y), (end_x, y), port.direction, 8)?;
-            route.run((end_x, y + 1), (end_x, end_y), 8, port.direction)?;
-            route.run(
-                (end_x + step, end_y),
-                (boundary, end_y),
-                port.direction,
-                port.direction,
-            )?
-        };
-        for row in rows
-            .iter_mut()
-            .filter(|r| r.output.entity_number == port.entity_number)
-        {
-            row.production_output = Some(row.output.clone());
-            row.output.entity_number = last;
-            row.output.position = route.doc.blueprint.entities[(last - 1) as usize].position;
-        }
-    }
-    Ok(())
 }

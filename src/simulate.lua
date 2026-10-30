@@ -3,6 +3,7 @@ local f, opts = cfg.factory, cfg.options
 local ingredients = cfg.inputs
 local common_input = f.bus ~= nil
 local storage_mode = #(f.storage or {}) > 0
+local collector_mode = f.bus and #(f.bus.output_entities or {}) > 0
 local feeds, observed, chests = {}, {}, {}
 local real, rows, outputs, surface, start_tick
 local inserted, delivered = 0, 0
@@ -14,7 +15,7 @@ local report = {
   inserted_items = 0, input_deliveries = {}, external_input_deliveries = {}, storage_deliveries = {}, row_outputs = {}, warmup_ticks = opts.warmup_ticks,
   input_measurement_location = common_input and "machines" or "boundary",
   output_measurement_location = storage_mode and "chests" or "belts",
-  row_measurement_location = storage_mode and "before-storage" or "boundary",
+  row_measurement_location = (storage_mode or collector_mode) and "machines" or "boundary",
   measurement_ticks = opts.measurement_ticks, machine_status_counts = {}, errors = {}
 }
 for name, version in pairs(script.active_mods) do report.mods[name] = version end
@@ -169,9 +170,10 @@ script.on_init(function()
   outputs = {}
   local by_output = {}
   for i, row in ipairs(f.rows) do
-    local lane = row.output.lanes == "left" and defines.transport_line.left_line or defines.transport_line.right_line
+    local production = row.production_output or row.output
+    local lane = production.lanes == "left" and defines.transport_line.left_line or defines.transport_line.right_line
     local measured = {
-      row_index = i, output_entity = row.output.entity_number, lane = row.output.lanes,
+      row_index = i, output_entity = row.output.entity_number, lane = production.lanes,
       target_per_second = row.output.rate / 1.05, measured_per_second = 0,
       delivered_items = 0, window_rates = {}
     }
@@ -250,7 +252,7 @@ script.on_event(defines.events.on_tick, function()
         for _, input in ipairs(hand.row.inputs) do
           if input.item == hand.last_item then input.measured.inserted_items = input.measured.inserted_items+dropped end
         end
-      elseif hand.kind == "output" and storage_mode then
+      elseif hand.kind == "output" and (storage_mode or collector_mode) then
         hand.row.measured.delivered_items = hand.row.measured.delivered_items+dropped
         hand.row.window_count = hand.row.window_count+dropped
       end
@@ -277,7 +279,10 @@ script.on_event(defines.events.on_tick, function()
       if tick > opts.warmup_ticks then
         delivered = delivered + count; window_count = window_count + count
         local row = port.rows[lane]
-        if row then
+        if collector_mode then
+          -- Row contributions are measured at their machine inserters before
+          -- streams mix. Boundary belts still determine total delivered flow.
+        elseif row then
           row.measured.delivered_items = row.measured.delivered_items + count
           row.window_count = row.window_count + count
         else

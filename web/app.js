@@ -399,7 +399,7 @@ function renderLaneMeasurements(report,factory) {
   section.replaceChildren();section.hidden=!report.row_outputs?.length;
   if(section.hidden)return;
   section.open=report.row_outputs.length<=4;
-  section.append(element('summary','',`Выпуск по рядам ${report.row_measurement_location==='before-storage'?'до склада':''} · ${report.row_outputs.length}`));
+  section.append(element('summary','',`Выпуск по рядам ${report.row_measurement_location==='machines'?'у машин':report.row_measurement_location==='before-storage'?'до склада':''} · ${report.row_outputs.length}`));
   if(factory.bus)section.append(element('p','field-hint','Плановая доля ряда — ориентир. Делители перераспределяют поток; проверяются общий выпуск и работа каждого ряда.'));
   const scroll=element('div','table-scroll'),table=element('table'),head=element('thead'),header=element('tr');
   for(const name of ['Выход','Ряд / полоса','Цель, /с','Измерено, /с']){const th=element('th','',name);th.scope='col';header.append(th);}

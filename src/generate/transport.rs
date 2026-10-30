@@ -151,6 +151,16 @@ pub(super) fn validate(
     };
     let extra = super::infrastructure_check::validate(data, f, ids, occupied)?;
     let mut used_belts = extra.belts;
+    let collected = f
+        .bus
+        .as_ref()
+        .is_some_and(|b| !b.output_entities.is_empty());
+    for id in super::output_check::validate(data, f, ids, occupied)? {
+        ensure!(
+            used_belts.insert(id),
+            "Output collector overlaps an input route"
+        );
+    }
     let mut used_machines = BTreeSet::new();
     let mut used_arms = extra.arms;
     let mut output_paths: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
@@ -159,6 +169,7 @@ pub(super) fn validate(
     let mut input_rates = vec![0.0; requirements.len()];
     let mut input_lanes = BTreeMap::<u32, BTreeSet<String>>::new();
     for row in &f.rows {
+        let production = row.production_output.as_ref().unwrap_or(&row.output);
         let ports: Vec<_> = row.input_ports().collect();
         ensure!(
             f.request
@@ -177,16 +188,17 @@ pub(super) fn validate(
             "Invalid row output"
         );
         ensure!(
-            matches!(row.output.lanes.as_str(), "left" | "right"),
+            matches!(production.lanes.as_str(), "left" | "right"),
             "Each row must declare exactly one output lane"
         );
         ensure!(
-            output_lanes.insert((row.output.entity_number, row.output.lanes.as_str())),
+            output_lanes.insert((production.entity_number, production.lanes.as_str())),
             "Output lane reused by multiple rows"
         );
         ensure!(
             ids.get(&row.output.entity_number)
-                .is_some_and(|e| e.position == row.output.position),
+                .is_some_and(|e| e.position == row.output.position)
+                && matches!(row.output.lanes.as_str(), "left" | "right" | "both"),
             "Output port coordinates mismatch"
         );
         let mut input_lines = Vec::new();
@@ -237,15 +249,17 @@ pub(super) fn validate(
             input_lines.push(path);
             input_rates[i] += port.rate;
         }
-        let production = row.production_output.as_ref().unwrap_or(&row.output);
         if row.production_output.is_some() {
             ensure!(
-                f.bus.as_ref().is_some_and(|b| b.compact),
-                "Output collector requires a compact bus"
+                f.bus
+                    .as_ref()
+                    .is_some_and(|b| b.compact || !b.output_entities.is_empty()),
+                "Output collector requires a shared bus"
             );
             ensure!(
                 production.item == row.output.item
-                    && production.lanes == row.output.lanes
+                    && (production.lanes == row.output.lanes
+                        || (collected && row.output.lanes == "both"))
                     && production.rate == row.output.rate
                     && production.direction == row.output.direction,
                 "Output collector changes material flow or lane assignment"
@@ -298,7 +312,7 @@ pub(super) fn validate(
             output_line.last() == Some(&production.entity_number),
             "Output port is not the end of its belt"
         );
-        if let Some(path) = output_paths.get(&row.output.entity_number) {
+        if let Some(path) = output_paths.get(&production.entity_number) {
             ensure!(
                 *path == output_line,
                 "Shared output must use the same complete belt path"
@@ -310,7 +324,7 @@ pub(super) fn validate(
                     "Output belt overlaps another input/output path"
                 );
             }
-            if row.production_output.is_some() {
+            if row.production_output.is_some() && !collected {
                 let collector = walk(
                     production.entity_number,
                     Some(row.output.entity_number),
@@ -327,7 +341,7 @@ pub(super) fn validate(
                     );
                 }
             }
-            output_paths.insert(row.output.entity_number, output_line.clone());
+            output_paths.insert(production.entity_number, output_line.clone());
         }
         let row_machines: BTreeSet<_> = row.machines.iter().copied().collect();
         ensure!(
@@ -382,7 +396,7 @@ pub(super) fn validate(
                         "Output needs the primary inserter"
                     );
                     ensure!(
-                        row.output.lanes
+                        production.lanes
                             == if (dy == 1) != f.request.reverse_output {
                                 "right"
                             } else {

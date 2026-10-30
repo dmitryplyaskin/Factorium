@@ -7,7 +7,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use factorium::{FactoryRequest, generate_blueprint, validate_factory};
 
 #[test]
-fn compact_bus_keeps_sixty_plate_inlets_local_and_collects_outputs_below_rows() -> Result<()> {
+fn compact_bus_keeps_sixty_plate_ports_inside_the_production_height() -> Result<()> {
     let mut raw = common::catalog_value();
     raw["recipes"]["iron-plate"]["energy"] = json!(3.2);
     let data = serde_json::from_value(raw)?;
@@ -25,9 +25,11 @@ fn compact_bus_keeps_sixty_plate_inlets_local_and_collects_outputs_below_rows() 
         assert_eq!(bus.lines.len(), 3);
         let mut inputs = f.external_inputs();
         inputs.sort_by(|a, b| a.position.y.total_cmp(&b.position.y));
-        assert!(inputs.windows(2).all(
-            |p| p[1].position.y - p[0].position.y == 1.0 && p[0].position.x == p[1].position.x
-        ));
+        assert!(
+            inputs
+                .windows(2)
+                .all(|p| p[1].position.y > p[0].position.y && p[0].position.x == p[1].position.x)
+        );
         let top = f
             .input_ports()
             .map(|p| p.position.y)
@@ -53,28 +55,95 @@ fn compact_bus_keeps_sixty_plate_inlets_local_and_collects_outputs_below_rows() 
         let bottom = f
             .input_ports()
             .map(|p| p.position.y)
-            .fold(f64::NEG_INFINITY, f64::max);
-        assert!(outputs.iter().all(|p| p.position.y > bottom));
-        assert!(outputs.windows(2).all(
-            |p| p[1].position.y - p[0].position.y == 1.0 && p[0].position.x == p[1].position.x
-        ));
-        if reverse {
-            assert!(f.rows[0].input.position.x - inputs[0].position.x <= 18.0);
-            assert!(
-                f.document
-                    .blueprint
-                    .entities
+            .chain(
+                f.rows
                     .iter()
-                    .filter(|e| e.name == bus.underground)
-                    .count()
-                    <= 16
-            );
+                    .map(|r| r.production_output.as_ref().unwrap_or(&r.output).position.y),
+            )
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(outputs.iter().all(|p| p.position.y <= bottom));
+        assert!(
+            outputs
+                .windows(2)
+                .all(|p| p[0].position.x == p[1].position.x)
+        );
+        if reverse {
+            assert!(f.rows[0].input.position.x - inputs[0].position.x <= 45.0);
         }
         let mut bad = f.clone();
         bad.rows[0].production_output.as_mut().unwrap().rate += 1.0;
         assert!(validate_factory(&data, &bad).is_err());
         let roundtrip = serde_json::from_value(serde_json::to_value(&f)?)?;
         validate_factory(&data, &roundtrip)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn shared_outputs_follow_flow_instead_of_row_count_and_use_both_lanes() -> Result<()> {
+    let data = common::catalog();
+    for reverse in [false, true] {
+        for rate in [5.0, 12.0, 14.0, 20.0] {
+            let mut request = FactoryRequest::new("automation-science-pack", rate);
+            request.common_input = true;
+            request.reverse_output = reverse;
+            request.max_machines_per_row = Some(8);
+            request.pole = "substation".into();
+            let f = generate_blueprint(&data, &request)?;
+            validate_factory(&data, &f)?;
+            assert!(f.bus.as_ref().unwrap().compact);
+            let outputs = f.output_ports();
+            assert_eq!(
+                outputs.len(),
+                (f.planned_output_per_second / f.belt_items_per_second).ceil() as usize,
+                "rate={rate}, reverse={reverse}"
+            );
+            assert!(
+                (outputs.iter().map(|p| p.rate).sum::<f64>() - f.planned_output_per_second).abs()
+                    < 1e-8
+            );
+            if rate < 15.0 {
+                assert_eq!(outputs.len(), 1);
+            }
+            let top = f
+                .input_ports()
+                .map(|p| p.position.y)
+                .fold(f64::INFINITY, f64::min);
+            assert_eq!(
+                f.external_inputs()
+                    .iter()
+                    .map(|p| p.position.y)
+                    .fold(f64::INFINITY, f64::min),
+                top
+            );
+            let bottom = f
+                .input_ports()
+                .map(|p| p.position.y)
+                .chain(
+                    f.rows
+                        .iter()
+                        .map(|r| r.production_output.as_ref().unwrap_or(&r.output).position.y),
+                )
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(outputs.iter().all(|p| p.position.y <= bottom));
+            if rate == 12.0 {
+                assert_eq!(outputs[0].lanes, "both");
+                assert!(outputs[0].rate > f.belt_items_per_second / 2.0);
+                let mut broken = f.clone();
+                let splitter = &f.bus.as_ref().unwrap().splitter;
+                let id = *f
+                    .bus
+                    .as_ref()
+                    .unwrap()
+                    .output_entities
+                    .iter()
+                    .find(|&&id| f.document.blueprint.entities[(id - 1) as usize].name == *splitter)
+                    .unwrap();
+                broken.document.blueprint.entities[(id - 1) as usize].direction =
+                    (broken.document.blueprint.entities[(id - 1) as usize].direction + 8) % 16;
+                assert!(validate_factory(&data, &broken).is_err());
+            }
+        }
     }
     Ok(())
 }
@@ -765,6 +834,9 @@ fn three_ingredients_select_lane_packing_from_supplied_flow() -> Result<()> {
                 let f = generate_blueprint(&data, &request)?;
                 validate_factory(&data, &f)?;
                 assert_eq!(f.inputs.len(), 3);
+                if common {
+                    assert_eq!(f.output_ports().len(), 1);
+                }
                 if common && belt_count == 2 {
                     assert_eq!(f.input_belt_count(), 2);
                 }

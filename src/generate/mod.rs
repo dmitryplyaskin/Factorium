@@ -5,6 +5,8 @@ mod infrastructure;
 mod infrastructure_check;
 mod input_plan;
 mod layout;
+mod output_bus;
+mod output_check;
 mod power;
 mod rows;
 mod transport;
@@ -112,6 +114,9 @@ pub struct InputBus {
     pub splitter: String,
     pub underground: String,
     pub lines: Vec<BusLine>,
+    /// Transport belonging to the shared output collector, excluding row belts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_entities: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,7 +142,7 @@ pub struct ProductionRow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_inputs: Vec<BeltPort>,
     pub output: BeltPort,
-    /// End of the production belt before the optional output collector.
+    /// End and lane of the production belt before the optional output collector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_output: Option<BeltPort>,
 }
@@ -1000,7 +1005,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                     .len()
             );
             if bus.as_ref().is_some_and(|b| b.compact) {
-                doc.blueprint.description.push_str(" Compact shared bus: ingredient belts enter from the west; splitters branch locally beside their production rows. Output belts are collected below the rows.");
+                doc.blueprint.description.push_str(" Compact shared bus: ingredient belts enter from the west; splitters branch locally beside their production rows. Outputs are merged by belt capacity alongside the rows.");
             } else if bus.is_some() && !request.reverse_output {
                 doc.blueprint.description.push_str(" Shared bus: connect separate ingredient belts from the north; splitters redistribute flow between rows.");
             }

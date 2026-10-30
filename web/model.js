@@ -99,7 +99,9 @@ export function outputPorts(factory) {
     let port=ports.get(row.output.entity_number);
     if(!port){port={...row.output,rate:0,left_rate:0,right_rate:0,rows:[]};ports.set(port.entity_number,port);}
     port.rate+=row.output.rate;
-    port[`${row.output.lanes}_rate`]+=row.output.rate;
+    if(row.output.lanes==='both'){
+      port.left_rate+=row.output.rate/2;port.right_rate+=row.output.rate/2;
+    }else port[`${row.output.lanes}_rate`]+=row.output.rate;
     port.rows.push(index+1);
     if(port.lanes!==row.output.lanes)port.lanes='both';
   }

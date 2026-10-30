@@ -51,6 +51,16 @@ test('two ingredients retain distinct ports, demands and row associations',()=>{
   assert.equal(recipeIngredients({ingredients:requirements}).length,2);
 });
 
+test('balanced collector contributions use both lanes without duplicating flow',()=>{
+  const output={entity_number:20,position:{x:-20,y:10},item:'automation-science-pack',lanes:'both'};
+  const ports=outputPorts({rows:[{output:{...output,rate:3}},{output:{...output,rate:2}}]});
+  assert.equal(ports.length,1);
+  assert.equal(ports[0].rate,5);
+  assert.equal(ports[0].left_rate,2.5);
+  assert.equal(ports[0].right_rate,2.5);
+  assert.deepEqual(ports[0].rows,[1,2]);
+});
+
 test('generation options invalidate snapshots while absent fields retain defaults',()=>{
   assert.equal(sameRequest(request,{...request,common_input:false,input_markers:false,output_chest:null,max_machines_per_row:null,max_row_width:null}),true);
   for(const [key,value] of Object.entries({common_input:true,reverse_output:true,input_markers:true,output_chest:'steel-chest',max_machines_per_row:4,max_row_width:20}))assert.equal(sameRequest(request,{...request,[key]:value}),false);

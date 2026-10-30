@@ -59,17 +59,13 @@ pub(super) fn place(
     doc: &mut BlueprintDocument,
     rates: Rates,
 ) -> Result<(Option<InputBus>, Vec<OutputStorage>, Vec<InputMarker>)> {
-    let bus = if request.common_input {
+    let mut bus = if request.common_input {
         Some(place_bus(data, request, rows, doc, rates.belt)?)
     } else {
         None
     };
-    if let Some(bus) = &bus {
-        if bus.compact {
-            super::compact_bus::collect_outputs(data, request, rows, doc, bus)?;
-        } else if request.reverse_output {
-            return_outputs(request, rows, doc, bus)?;
-        }
+    if let Some(bus) = &mut bus {
+        super::output_bus::place(data, request, rows, doc, bus, rates.belt)?;
     }
     let storage = if let Some(chest) = &request.output_chest {
         place_storage(data, request, rows, doc, chest, rates)?
@@ -167,12 +163,29 @@ fn place_bus(
         - 2 * depth
         - 4;
     let leaf_count: usize = groups.iter().map(Vec::len).sum();
-    let all_columns: Vec<_> = (0..leaf_count).map(|i| -8 - 4 * i as i32).collect();
+    let output_groups = super::output_bus::groups(rows, belt_rate);
+    let reserve =
+        if !request.reverse_output || (output_groups.len() == 1 && output_groups[0].len() == 1) {
+            0
+        } else {
+            4 * output_groups.len() as i32
+                + if output_groups
+                    .iter()
+                    .any(|g| super::output_bus::needs_balance(rows, g, belt_rate))
+                {
+                    8
+                } else {
+                    0
+                }
+        };
+    let all_columns: Vec<_> = (0..leaf_count)
+        .map(|i| -8 - reserve - 4 * i as i32)
+        .collect();
     let mut lines = Vec::new();
     let mut assigned = 0;
     for group in &mut groups {
         group.sort_by(|a, b| a.position.y.total_cmp(&b.position.y));
-        let x = -8 - 4 * (assigned + group.len() - 1) as i32;
+        let x = -8 - reserve - 4 * (assigned + group.len() - 1) as i32;
         assigned += group.len();
         let source = doc.blueprint.entities.len() as u32 + 1;
         let mut route = BusTree {
@@ -236,60 +249,8 @@ fn place_bus(
         splitter: splitter.prototype.name.clone(),
         underground: underground.prototype.name.clone(),
         lines,
+        output_entities: Vec::new(),
     })
-}
-
-/// Cross input trunks underground so both lanes remain independent all the
-/// way from the production rows to the west boundary.
-fn return_outputs(
-    request: &FactoryRequest,
-    rows: &mut [ProductionRow],
-    doc: &mut BlueprintDocument,
-    bus: &InputBus,
-) -> Result<()> {
-    let west = bus.lines[0].source.position.x.floor() as i32;
-    let occupied: HashSet<_> = doc
-        .blueprint
-        .entities
-        .iter()
-        .map(|e| (e.position.x.floor() as i32, e.position.y.floor() as i32))
-        .collect();
-    for port in outputs(rows) {
-        let y = port.position.y.floor() as i32;
-        let mut x = port.position.x.floor() as i32 - 1;
-        let mut last = port.entity_number;
-        while x >= west {
-            if occupied.contains(&(x - 1, y)) {
-                ensure!(x - 3 >= west, "Not enough room for an output crossing");
-                for (tx, kind) in [(x, "input"), (x - 3, "output")] {
-                    ensure!(
-                        !occupied.contains(&(tx, y)),
-                        "Output crossing overlaps an input"
-                    );
-                    last = doc.add(
-                        &bus.underground,
-                        f64::from(tx) + 0.5,
-                        f64::from(y) + 0.5,
-                        12,
-                    );
-                    doc.blueprint.entities[(last - 1) as usize].belt_type = Some(kind.into());
-                }
-                x -= 4;
-            } else {
-                ensure!(!occupied.contains(&(x, y)), "Output overlaps an input");
-                last = doc.add(&request.belt, f64::from(x) + 0.5, f64::from(y) + 0.5, 12);
-                x -= 1;
-            }
-        }
-        for row in rows
-            .iter_mut()
-            .filter(|r| r.output.entity_number == port.entity_number)
-        {
-            row.output.entity_number = last;
-            row.output.position = doc.blueprint.entities[(last - 1) as usize].position;
-        }
-    }
-    Ok(())
 }
 
 /// A balanced splitter tree above the rows, with isolated vertical leaf trunks.

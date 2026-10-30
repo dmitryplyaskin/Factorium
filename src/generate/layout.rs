@@ -130,7 +130,10 @@ impl Score {
             f64::NEG_INFINITY,
         );
         for e in entities {
-            let [w, h] = factory.entity_sizes[&e.name];
+            let [mut w, mut h] = factory.entity_sizes[&e.name];
+            if matches!(e.direction, 4 | 12) {
+                std::mem::swap(&mut w, &mut h);
+            }
             x0 = x0.min(e.position.x - f64::from(w) / 2.0);
             x1 = x1.max(e.position.x + f64::from(w) / 2.0);
             y0 = y0.min(e.position.y - f64::from(h) / 2.0);
