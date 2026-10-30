@@ -1,4 +1,5 @@
 import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputBelts, inputRequirements, recipeIngredients, itemGroups, groupInfo, subgroupLabel, recipeGroup, recipeTitle, filterRecipes } from './model.js';
+import { transportLayout, transportSymbols, transportTile, transportDevice, transportPalette, directionLabel } from './transport.js';
 
 const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -240,28 +241,32 @@ function setArtifact(artifact,restoreForm=false) {
 
 function drawFactory(f) {
   const requirements=inputRequirements(f);
-  const scene=$('scene');scene.replaceChildren(svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
-  const powerGroup=svg('g',{'data-layer':'power'}),wireGroup=svg('g',{'data-layer':'wires'}),bodyGroup=svg('g'),portsGroup=svg('g',{'data-layer':'ports'});
+  document.querySelector('.legend-belt').style.backgroundColor=transportPalette(f.request.belt).rail;
+  const scene=$('scene');scene.replaceChildren(transportSymbols(svg,f.request.belt),svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
+  const powerGroup=svg('g',{'data-layer':'power'}),wireGroup=svg('g',{'data-layer':'wires'}),tunnelGroup=svg('g',{'data-layer':'tunnels','pointer-events':'none'}),bodyGroup=svg('g'),portsGroup=svg('g',{'data-layer':'ports'});
   const entities=f.document.blueprint.entities,byID=new Map(entities.map(e=>[e.entity_number,e]));
+  const transport=transportLayout(entities,f.request.belt,f.bus);
+  for(const {input,output} of transport.tunnels){
+    const a=input.position,b=output.position,d=`M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+    tunnelGroup.append(svg('path',{d,fill:'none',stroke:'#0c1117','stroke-width':.15}));
+    tunnelGroup.append(svg('path',{d,fill:'none',stroke:transportPalette(f.request.belt).arrow,'stroke-width':.045,'stroke-dasharray':'.14 .22','stroke-opacity':.4}));
+  }
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
   for(const e of entities) {
-    const [w,h]=f.entity_sizes[e.name],x=e.position.x,y=e.position.y;
+    const size=f.entity_sizes[e.name],rotated=[4,12].includes(e.direction);
+    const [w,h]=rotated?[size[1],size[0]]:size,x=e.position.x,y=e.position.y;
     const isPole=e.name===f.request.pole;
     const radius=isPole ? Math.max(w/2,f.power.supply_area_distance) : w/2;
     x0=Math.min(x0,x-radius);x1=Math.max(x1,x+radius);y0=Math.min(y0,y-(isPole?radius:h/2));y1=Math.max(y1,y+(isPole?radius:h/2));
     if(isPole){const r=f.power.supply_area_distance;powerGroup.append(svg('rect',{x:x-r,y:y-r,width:2*r,height:2*r,fill:'#91d9ad','fill-opacity':.035,stroke:'#91d9ad','stroke-opacity':.23,'stroke-width':.045}));}
-    const group=svg('g',{'data-entity':e.entity_number});group.append(svg('title',{},`${label(e.name)} · #${e.entity_number}`));
+    const group=svg('g',{'data-entity':e.entity_number});group.append(svg('title',{},`${label(e.name)} · #${e.entity_number}${e.name===f.request.belt || e.name===f.bus?.splitter || e.name===f.bus?.underground?` · ${directionLabel(e.direction)}${e.type?` · ${e.type==='input'?'Вход под землю':'Выход на поверхность'}`:''}`:''}`));
     if(e.name===f.request.machine){
       group.append(svg('rect',{class:'entity-body',x:x-w/2+.06,y:y-h/2+.06,width:w-.12,height:h-.12,rx:.14,fill:'#24453e',stroke:'#70ad99','stroke-width':.06}));
       const size=Math.min(w,h)*.64;group.append(svg('image',{href:iconURL(e.name),x:x-size/2,y:y-size/2,width:size,height:size,'pointer-events':'none'}));
     } else if(e.name===f.request.belt){
-      group.append(svg('rect',{class:'entity-body',x:x-.47,y:y-.47,width:.94,height:.94,rx:.05,fill:'#7d683b',stroke:'#b39859','stroke-width':.035}));
-      group.append(svg('path',{transform:`rotate(${(e.direction || 0)*22.5-90} ${x} ${y})`,d:`M ${x-.27} ${y-.29} L ${x+.06} ${y-.29} L ${x-.08} ${y-.4} M ${x-.27} ${y+.21} L ${x+.12} ${y+.21} L ${x-.02} ${y+.1}`,fill:'none',stroke:'#dbbd73','stroke-width':.07,'pointer-events':'none'}));
+      group.append(...transportTile(svg,e,transport.belts.get(e.entity_number)));
     } else if(e.name===f.bus?.splitter || e.name===f.bus?.underground){
-      const underground=e.name===f.bus.underground;
-      group.append(svg('rect',{class:'entity-body',x:x-w/2+.05,y:y-h/2+.05,width:w-.1,height:h-.1,rx:.08,fill:underground?'#5b4d38':'#867440',stroke:'#e4c87d','stroke-width':.06}));
-      group.append(svg('image',{href:iconURL(e.name),x:x-w*.43,y:y-h*.43,width:w*.86,height:h*.86,'pointer-events':'none'}));
-      if(underground)group.append(svg('text',{x,y:y+.17,'text-anchor':'middle','font-size':.45,fill:'#fff','pointer-events':'none'},e.type==='input'?'↓':'↑'));
+      group.append(...transportDevice(svg,e,{splitter:f.bus.splitter,belt:f.request.belt,w,h,sprites:state.catalog.transport_sprites}));
     } else if(e.name==='constant-combinator'){
       const marker=f.markers?.find(m=>m.entity_number===e.entity_number);
       group.append(svg('rect',{class:'entity-body',x:x-.45,y:y-.45,width:.9,height:.9,rx:.08,fill:'#3c4e63',stroke:'#b6c9e2','stroke-width':.06}));
@@ -297,13 +302,14 @@ function drawFactory(f) {
   }
   const p=f.power.connection_position;
   portsGroup.append(svg('circle',{cx:p.x,cy:p.y,r:.65,fill:'none',stroke:'#c9b5ec','stroke-width':.08,'stroke-dasharray':'.15 .12'}));
-  scene.append(powerGroup,wireGroup,bodyGroup,portsGroup);
+  scene.append(powerGroup,tunnelGroup,wireGroup,bodyGroup,portsGroup);
   const bounds={x:x0-8,y:y0-3,w:x1-x0+16,h:y1-y0+6};
   state.fitted=bounds;fit();
 }
 
 function applyView() {
   if(!state.view)return;const v=state.view;$('factory-canvas').setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
+  $('factory-canvas').classList.toggle('transport-small',$('viewport').clientWidth/v.w<12);
   text('zoom-level',`${Math.round((state.fitWidth || state.fitted.w)/v.w*100)}%`);
 }
 function fit(){
@@ -342,6 +348,8 @@ function inspect(id) {
   let detail=`x ${number(e.position.x)} · y ${number(e.position.y)}`;
   if(e.name===f.request.pole)detail+=`\nПитание: ${number(f.power.supply_area_distance*2)} × ${number(f.power.supply_area_distance*2)} · провод: ${number(f.power.max_wire_distance)}`;
   else if(e.name===f.request.machine)detail+=`\n${f.recipe}`;
+  if(e.name===f.request.belt || e.name===f.bus?.splitter || e.name===f.bus?.underground)detail+=`\nНаправление: ${directionLabel(e.direction)}`;
+  if(e.name===f.bus?.underground)detail+=e.type==='input'?'\nВход в подземный участок':'\nВыход на поверхность';
   const marker=f.markers?.find(m=>m.entity_number===id);if(marker)detail+=`\n${label(marker.item)} · ${number(marker.rate)}/с · вход #${marker.target_entity}`;
   text('inspector-detail',detail);$('entity-inspector').hidden=false;
 }
@@ -495,7 +503,7 @@ $('factory-form').addEventListener('input',()=>{optionsChanged();updateState();p
 $('recipe-select').addEventListener('change',()=>{recipeChanged();persist();});
 for(const id of ['machine','belt','inserter','secondary-inserter','pole'])$(id).addEventListener('change',()=>{equipmentChanged();persist();});
 for(const button of document.querySelectorAll('[data-rate]'))button.addEventListener('click',()=>{$('rate').value=button.dataset.rate;updateState();persist();});
-for(const [id,layer] of [['show-power','power'],['show-wires','wires'],['show-ports','ports']])$(id).addEventListener('change',()=>$('viewport').classList.toggle(`hide-${layer}`,!$(id).checked));
+for(const [id,layer] of [['show-power','power'],['show-wires','wires'],['show-ports','ports'],['show-tunnels','tunnels']])$(id).addEventListener('change',()=>$('viewport').classList.toggle(`hide-${layer}`,!$(id).checked));
 $('zoom-in').addEventListener('click',()=>zoom(1.3));$('zoom-out').addEventListener('click',()=>zoom(1/1.3));$('zoom-fit').addEventListener('click',fit);
 $('factory-canvas').addEventListener('wheel',event=>{if(!state.view)return;event.preventDefault();zoom(event.deltaY<0?1.12:1/1.12,screenPoint(event));},{passive:false});
 $('factory-canvas').addEventListener('pointerdown',event=>{if(!state.view || event.button!==0)return;const p=screenPoint(event);state.drag={id:event.pointerId,start:p,view:{...state.view},clientX:event.clientX,clientY:event.clientY,target:event.target.closest('[data-entity]')?.dataset.entity};$('factory-canvas').setPointerCapture(event.pointerId);});

@@ -39,6 +39,7 @@ struct AppState {
     catalog_response: Arc<Value>,
     game: Arc<Option<ExtractOptions>>,
     icons: Arc<HashMap<String, Vec<u8>>>,
+    transport_sprites: Arc<HashMap<String, Vec<u8>>>,
     records: Arc<Mutex<VecDeque<Arc<Artifact>>>>,
     generation_slots: Arc<Semaphore>,
     game_slot: Arc<Semaphore>,
@@ -213,18 +214,19 @@ fn build_catalog(data: &GameData, game_available: bool) -> Value {
         "verification_available":game_available,"verification_hint":if game_available {"Factorio готова к проверке"} else {"Factorio не найдена. Запустите сервер с параметром --factorio."}})
 }
 
-fn load_icons(data: &GameData, game: Option<&ExtractOptions>) -> HashMap<String, Vec<u8>> {
-    let Some(game) = game else {
-        return HashMap::new();
-    };
-    let root = game.data_directory.clone().or_else(|| {
+fn game_data_root(game: Option<&ExtractOptions>) -> Option<std::path::PathBuf> {
+    let game = game?;
+    game.data_directory.clone().or_else(|| {
         game.factorio
             .parent()
             .and_then(std::path::Path::parent)
             .and_then(std::path::Path::parent)
             .map(|p| p.join("data"))
-    });
-    let Some(root) = root else {
+    })
+}
+
+fn load_icons(data: &GameData, game: Option<&ExtractOptions>) -> HashMap<String, Vec<u8>> {
+    let Some(root) = game_data_root(game) else {
         return HashMap::new();
     };
     let mut result = HashMap::new();
@@ -249,16 +251,64 @@ fn load_icons(data: &GameData, game: Option<&ExtractOptions>) -> HashMap<String,
     result
 }
 
+// Serve installed game art only; no proprietary textures are bundled or copied
+// into the repository. Keep the allowlist independent of URL input.
+fn load_transport_sprites(game: Option<&ExtractOptions>) -> HashMap<String, Vec<u8>> {
+    let mut sprites = HashMap::new();
+    let Some(root) = game_data_root(game) else {
+        return sprites;
+    };
+    for prefix in ["", "fast-", "express-", "turbo-"] {
+        let module = if prefix == "turbo-" {
+            "space-age"
+        } else {
+            "base"
+        };
+        for device in ["underground-belt", "splitter"] {
+            let name = format!("{prefix}{device}");
+            let variants: &[&str] = if device == "underground-belt" {
+                &["structure"]
+            } else {
+                &[
+                    "north",
+                    "east",
+                    "south",
+                    "west",
+                    "east-top_patch",
+                    "west-top_patch",
+                ]
+            };
+            for variant in variants {
+                let key = format!("{name}-{variant}");
+                let path = root
+                    .join(module)
+                    .join("graphics/entity")
+                    .join(&name)
+                    .join(format!("{key}.png"));
+                if let Ok(bytes) = std::fs::read(path) {
+                    sprites.insert(key, bytes);
+                }
+            }
+        }
+    }
+    sprites
+}
+
 impl AppState {
     fn new(catalog: GameData, game: Option<ExtractOptions>, port: u16) -> Self {
         let available = game.as_ref().is_some_and(|g| g.factorio.is_file());
-        let response = build_catalog(&catalog, available);
+        let mut response = build_catalog(&catalog, available);
         let icons = load_icons(&catalog, game.as_ref());
+        let transport_sprites = load_transport_sprites(game.as_ref());
+        let mut sprite_names: Vec<_> = transport_sprites.keys().collect();
+        sprite_names.sort();
+        response["transport_sprites"] = json!(sprite_names);
         Self {
             catalog: Arc::new(catalog),
             catalog_response: Arc::new(response),
             game: Arc::new(game),
             icons: Arc::new(icons),
+            transport_sprites: Arc::new(transport_sprites),
             records: Arc::new(Mutex::new(VecDeque::new())),
             generation_slots: Arc::new(Semaphore::new(2)),
             game_slot: Arc::new(Semaphore::new(1)),
@@ -286,10 +336,12 @@ fn router(state: AppState) -> Router {
         .route("/",get(||async{Html(include_str!("../web/index.html"))}))
         .route("/app.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/app.js"))}))
         .route("/model.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/model.js"))}))
+        .route("/transport.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/transport.js"))}))
         .route("/style.css",get(||async{asset("text/css; charset=utf-8",include_str!("../web/style.css"))}))
         .route("/favicon.svg",get(||async{asset("image/svg+xml",r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#efbe61"/><path d="M9 8h16v5H14v4h8v5h-8v5H9z" fill="#171b20"/></svg>"##)}))
         .route("/api/catalog",get(catalog))
         .route("/api/icons/{name}",get(icon))
+        .route("/api/transport-sprites/{name}",get(transport_sprite))
         .route("/api/artifacts",get(history).post(generate))
         .route("/api/artifacts/{id}",get(artifact))
         .route("/api/artifacts/{id}/verification",get(verification).post(verify))
@@ -368,6 +420,13 @@ async fn local_requests(
 
 async fn catalog(State(s): State<AppState>) -> Json<Value> {
     Json((*s.catalog_response).clone())
+}
+
+async fn transport_sprite(State(s): State<AppState>, Path(name): Path<String>) -> Response {
+    match s.transport_sprites.get(&name) {
+        Some(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes.clone()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn icon(State(s): State<AppState>, Path(name): Path<String>) -> Response {

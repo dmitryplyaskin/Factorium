@@ -6,7 +6,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use factorium::{
-    FactoryRequest,
+    ExtractOptions, FactoryRequest,
     web::{WebOptions, application},
 };
 use serde_json::{Value, json};
@@ -38,6 +38,63 @@ fn request(method: &str, path: &str, body: Value) -> Request<Body> {
 }
 async fn json_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 10_000_000).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn transport_sprites_come_from_the_configured_game_and_missing_art_is_explicit() {
+    let without_game = json_body(
+        app()
+            .oneshot(request("GET", "/api/catalog", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(without_game["transport_sprites"], json!([]));
+
+    let directory = tempfile::tempdir().unwrap();
+    let sprite_directory = directory.path().join("base/graphics/entity/fast-splitter");
+    std::fs::create_dir_all(&sprite_directory).unwrap();
+    let png = b"\x89PNG\r\n\x1a\nfixture";
+    std::fs::write(sprite_directory.join("fast-splitter-east.png"), png).unwrap();
+    let mut game = ExtractOptions::new("unused-factorio");
+    game.data_directory = Some(directory.path().to_owned());
+    let router = application(
+        common::catalog(),
+        WebOptions {
+            port: 3410,
+            game: Some(game),
+        },
+    );
+    let catalog = json_body(
+        router
+            .clone()
+            .oneshot(request("GET", "/api/catalog", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(catalog["transport_sprites"], json!(["fast-splitter-east"]));
+    let sprite = router
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/transport-sprites/fast-splitter-east",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sprite.status(), StatusCode::OK);
+    assert_eq!(sprite.headers()["content-type"], "image/png");
+    assert_eq!(&to_bytes(sprite.into_body(), 1000).await.unwrap()[..], png);
+    let absent = router
+        .oneshot(request(
+            "GET",
+            "/api/transport-sprites/fast-splitter-west",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
