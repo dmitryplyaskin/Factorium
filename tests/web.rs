@@ -56,6 +56,11 @@ async fn transport_sprites_come_from_the_configured_game_and_missing_art_is_expl
     std::fs::create_dir_all(&sprite_directory).unwrap();
     let png = b"\x89PNG\r\n\x1a\nfixture";
     std::fs::write(sprite_directory.join("fast-splitter-east.png"), png).unwrap();
+    let belt_directory = directory
+        .path()
+        .join("base/graphics/entity/fast-transport-belt");
+    std::fs::create_dir_all(&belt_directory).unwrap();
+    std::fs::write(belt_directory.join("fast-transport-belt.png"), png).unwrap();
     let mut game = ExtractOptions::new("unused-factorio");
     game.data_directory = Some(directory.path().to_owned());
     let router = application(
@@ -73,7 +78,21 @@ async fn transport_sprites_come_from_the_configured_game_and_missing_art_is_expl
             .unwrap(),
     )
     .await;
-    assert_eq!(catalog["transport_sprites"], json!(["fast-splitter-east"]));
+    assert_eq!(
+        catalog["transport_sprites"],
+        json!(["fast-splitter-east", "fast-transport-belt"])
+    );
+    let belt = router
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/transport-sprites/fast-transport-belt",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(belt.status(), StatusCode::OK);
+    assert_eq!(&to_bytes(belt.into_body(), 1000).await.unwrap()[..], png);
     let sprite = router
         .clone()
         .oneshot(request(

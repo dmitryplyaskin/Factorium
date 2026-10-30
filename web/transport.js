@@ -4,14 +4,19 @@ const at = (x,y) => `${x},${y}`;
 export const directionLabel = direction => ({0:'на север ↑',4:'на восток →',8:'на юг ↓',12:'на запад ←'}[direction ?? 0] || '');
 
 export function transportLayout(entities,belt,bus) {
-  const emitters=new Map(),belts=new Map(),tunnels=[];
+  const emitters=new Map(),receivers=new Map(),belts=new Map(),tunnels=[];
   const emit=(x,y,direction)=>emitters.set(at(x,y),direction ?? 0);
   for(const e of entities) {
     const {x,y}=e.position,d=e.direction ?? 0;
     if(e.name===belt || (e.name===bus?.underground && e.type==='output'))emit(x,y,d);
+    if(e.name===belt)receivers.set(at(x,y),null);
+    if(e.name===bus?.underground && e.type==='input')receivers.set(at(x,y),d);
     if(e.name===bus?.splitter){
       const [dx,dy]=vectors[d];
-      for(const offset of [-.5,.5])emit(x-dy*offset,y+dx*offset,d);
+      for(const offset of [-.5,.5]){
+        emit(x-dy*offset,y+dx*offset,d);
+        receivers.set(at(x-dy*offset,y+dx*offset),d);
+      }
     }
   }
   for(const e of entities) {
@@ -23,7 +28,9 @@ export function transportLayout(entities,belt,bus) {
       // A rear feed (or two opposing side feeds) keeps a belt straight.
       const entry=!feedsFrom(rear) && sideInputs.length===1?sideInputs[0]:rear;
       const turn=entry!==rear,axis=d===0 || d===8?y:x;
-      belts.set(e.entity_number,{direction:d,entry,turn,arrow:!turn && (Math.floor(axis)%4===0 || !feedsFrom(rear))});
+      const [dx,dy]=vectors[d],receiver=receivers.get(at(x+dx,y+dy));
+      belts.set(e.entity_number,{direction:d,entry,turn,arrow:!turn && (Math.floor(axis)%4===0 || !feedsFrom(rear)),
+        start:!turn && !feedsFrom(rear),end:receiver!==null && receiver!==d});
     }
     if(e.name===bus?.underground && e.type==='input'){
       const [dx,dy]=vectors[d];
@@ -46,7 +53,7 @@ export function transportPalette(name) {
 }
 
 // Reusable symbols keep large blueprints cheap: each tile adds one <use>.
-export function transportSymbols(svg,name) {
+export function transportSymbols(svg,name,sprites=[]) {
   const defs=svg('defs'),palette=transportPalette(name);
   const path=(d,stroke,width,extra={})=>svg('path',{d,fill:'none',stroke,'stroke-width':width,...extra});
   for(const [id,d] of [['belt-straight','M -.5 0 H .5'],['belt-turn','M 0 -.5 A .5 .5 0 0 0 .5 0']]){
@@ -59,19 +66,50 @@ export function transportSymbols(svg,name) {
   }
   const arrow=svg('symbol',{id:'belt-arrow',viewBox:'-.5 -.5 1 1'});
   arrow.append(path('M -.12 -.14 L .06 0 L -.12 .14',palette.arrow,.06,{'stroke-linecap':'round','stroke-linejoin':'round'}));
-  defs.append(arrow);return defs;
+  defs.append(arrow);
+  if(sprites.includes(name)){
+    const columns=name==='transport-belt'?16:name==='turbo-transport-belt'?64:32;
+    defs.append(svg('image',{id:'belt-game-atlas',href:`/api/transport-sprites/${name}`,width:columns*128,height:20*128}));
+    for(let index=1;index<=20;index++){
+      const symbol=svg('symbol',{id:`belt-game-${index}`,viewBox:'-1 -1 2 2',overflow:'visible'});
+      const crop=svg('svg',{x:-1,y:-1,width:2,height:2,viewBox:`0 ${(index-1)*128} 128 128`,overflow:'hidden'});
+      crop.append(svg('use',{href:'#belt-game-atlas'}));symbol.append(crop);defs.append(symbol);
+    }
+  }
+  return defs;
 }
+
+const straightIndex={0:3,4:1,8:4,12:2};
+// Indices from Factorio's belt animation set. These are direction-specific
+// perspective drawings; never rotate or mirror the original texture.
+export function beltSpriteLayers(shape) {
+  const {direction:d,entry,turn,start,end}=shape,[dx,dy]=vectors[d];
+  const cornerIndex={'12,0':5,'8,4':6,'4,0':7,'8,12':8,'0,4':9,'12,8':10,'0,12':11,'4,8':12};
+  const layers=[{index:turn?cornerIndex[`${(entry+8)%16},${d}`]:straightIndex[d],x:0,y:0}];
+  // The cap lives in the adjacent tile, at its edge nearest the belt.
+  if(start)layers.push({index:({0:13,4:15,8:17,12:19})[d],x:-dx,y:-dy});
+  if(end)layers.push({index:({0:18,4:20,8:14,12:16})[d],x:dx,y:dy});
+  return layers;
+}
+
+const gameBeltUse=(svg,index,x=0,y=0)=>svg('use',{href:`#belt-game-${index}`,x:x-1,y:y-1,width:2,height:2});
 
 // Local space of every transport tile: +x is the flow, one tile is one unit.
 // Belts and fallback device drawings share it so their lanes always line up.
 export const transportRotation = direction => (direction ?? 0) * 22.5 - 90;
 
-export function transportTile(svg,e,shape) {
+export function transportTile(svg,e,shape,sprites=[]) {
   const d=e.direction ?? 0;
-  const group=svg('g',{transform:`translate(${e.position.x} ${e.position.y}) rotate(${transportRotation(d)})`,'pointer-events':'none'});
+  const native=sprites.includes(e.name);
+  const group=svg('g',{class:native?'transport-belt-sprite':'',transform:`translate(${e.position.x} ${e.position.y})${native?'':` rotate(${transportRotation(d)})`}`,'pointer-events':'none'});
   const id=shape.turn?'belt-turn':'belt-straight',mirror=shape.turn && shape.entry===(d+4)%16;
-  group.append(svg('use',{href:`#${id}`,x:-.5,y:-.5,width:1,height:1,transform:mirror?'scale(1 -1)':'scale(1 1)'}));
-  if(shape.arrow)group.append(svg('use',{href:'#belt-arrow',class:'belt-direction',x:-.5,y:-.5,width:1,height:1}));
+  if(native){
+    for(const {index,x,y} of beltSpriteLayers(shape))group.append(gameBeltUse(svg,index,x,y));
+    group.append(svg('rect',{class:'belt-tile-seam',x:-.5,y:-.5,width:1,height:1,fill:'none',stroke:'#10171e','stroke-width':.025,'stroke-opacity':.5}));
+  } else {
+    group.append(svg('use',{href:`#${id}`,x:-.5,y:-.5,width:1,height:1,transform:mirror?'scale(1 -1)':'scale(1 1)'}));
+    if(shape.arrow)group.append(svg('use',{href:'#belt-arrow',class:'belt-direction',x:-.5,y:-.5,width:1,height:1}));
+  }
   const hitbox=svg('rect',{class:'entity-body transport-hitbox',x:e.position.x-.48,y:e.position.y-.48,width:.96,height:.96,rx:.05,fill:'transparent',stroke:'transparent','stroke-width':.045});
   return [group,hitbox];
 }
@@ -114,14 +152,21 @@ export function transportDevice(svg,e,{splitter,belt,w,h,sprites=[]}) {
   const hitbox=svg('rect',{class:'entity-body transport-hitbox',x:e.position.x-w/2+.02,y:e.position.y-h/2+.02,width:w-.04,height:h-.04,rx:.05,fill:'transparent',stroke:'transparent','stroke-width':.045});
   const frames=transportSpriteFrames(e,sprites);
   if(frames.length){
-    if(e.name===splitter)group.append(lane(-.5),lane(.5));else group.append(lane(0));
+    const base=svg('g',{transform:`translate(${e.position.x} ${e.position.y})`,'pointer-events':'none'});
+    if(sprites.includes(belt)){
+      const d=e.direction ?? 0,[dx,dy]=vectors[d];
+      for(const offset of e.name===splitter?[-.5,.5]:[0])base.append(gameBeltUse(svg,straightIndex[d],-dy*offset,dx*offset));
+    } else {
+      if(e.name===splitter)group.append(lane(-.5),lane(.5));else group.append(lane(0));
+      base.setAttribute('transform','');base.append(group);
+    }
     const art=svg('g',{class:'transport-device-sprite',transform:`translate(${e.position.x} ${e.position.y})`,'pointer-events':'none'});
     for(const f of frames){
       const crop=svg('svg',{x:f.x,y:f.y,width:f.width/64,height:f.height/64,viewBox:`${f.sx} ${f.sy} ${f.width} ${f.height}`,overflow:'hidden'});
       crop.append(svg('image',{href:`/api/transport-sprites/${f.asset}`,width:f.width*f.columns,height:f.height*f.rows}));
       art.append(crop);
     }
-    return [group,art,hitbox];
+    return [base,art,hitbox];
   }
   // Schematics remain available without a local game install or for modded art.
   if(e.name===splitter){

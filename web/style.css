@@ -60,7 +60,6 @@ main,.workbench,.workspace,.canvas-panel {display:contents}
 #factory-canvas .selected>.entity-body {stroke:var(--amber);stroke-width:.13}
 .viewport.hide-power [data-layer=power],.viewport.hide-wires [data-layer=wires],.viewport.hide-ports [data-layer=ports],.viewport.hide-tunnels [data-layer=tunnels] {display:none}
 .transport-small .belt-direction {opacity:.65}
-.transport-device-sprite {filter:saturate(.72) brightness(.92)}
 .app-header {position:fixed;z-index:5;top:14px;left:14px;right:68px;min-height:60px;display:flex;align-items:center;gap:24px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}
 .brand {display:flex;gap:10px;align-items:center;font-size:1.0625rem;font-weight:650;letter-spacing:-.03em}
 .brand-mark {position:relative;display:grid;place-items:center;width:32px;height:34px;border-radius:6px;background:var(--amber);color:#18202a;font:700 25px/1 var(--mono)}

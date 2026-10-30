@@ -242,7 +242,7 @@ function setArtifact(artifact,restoreForm=false) {
 function drawFactory(f) {
   const requirements=inputRequirements(f);
   document.querySelector('.legend-belt').style.backgroundColor=transportPalette(f.request.belt).rail;
-  const scene=$('scene');scene.replaceChildren(transportSymbols(svg,f.request.belt),svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
+  const scene=$('scene');scene.replaceChildren(transportSymbols(svg,f.request.belt,state.catalog.transport_sprites),svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
   const powerGroup=svg('g',{'data-layer':'power'}),wireGroup=svg('g',{'data-layer':'wires'}),tunnelGroup=svg('g',{'data-layer':'tunnels','pointer-events':'none'}),bodyGroup=svg('g'),portsGroup=svg('g',{'data-layer':'ports'});
   const entities=f.document.blueprint.entities,byID=new Map(entities.map(e=>[e.entity_number,e]));
   const transport=transportLayout(entities,f.request.belt,f.bus);
@@ -264,7 +264,7 @@ function drawFactory(f) {
       group.append(svg('rect',{class:'entity-body',x:x-w/2+.06,y:y-h/2+.06,width:w-.12,height:h-.12,rx:.14,fill:'#24453e',stroke:'#70ad99','stroke-width':.06}));
       const size=Math.min(w,h)*.64;group.append(svg('image',{href:iconURL(e.name),x:x-size/2,y:y-size/2,width:size,height:size,'pointer-events':'none'}));
     } else if(e.name===f.request.belt){
-      group.append(...transportTile(svg,e,transport.belts.get(e.entity_number)));
+      group.append(...transportTile(svg,e,transport.belts.get(e.entity_number),state.catalog.transport_sprites));
     } else if(e.name===f.bus?.splitter || e.name===f.bus?.underground){
       group.append(...transportDevice(svg,e,{splitter:f.bus.splitter,belt:f.request.belt,w,h,sprites:state.catalog.transport_sprites}));
     } else if(e.name==='constant-combinator'){

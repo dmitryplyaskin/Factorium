@@ -264,6 +264,15 @@ fn load_transport_sprites(game: Option<&ExtractOptions>) -> HashMap<String, Vec<
         } else {
             "base"
         };
+        let belt = format!("{prefix}transport-belt");
+        let path = root
+            .join(module)
+            .join("graphics/entity")
+            .join(&belt)
+            .join(format!("{belt}.png"));
+        if let Ok(bytes) = std::fs::read(path) {
+            sprites.insert(belt, bytes);
+        }
         for device in ["underground-belt", "splitter"] {
             let name = format!("{prefix}{device}");
             let variants: &[&str] = if device == "underground-belt" {
