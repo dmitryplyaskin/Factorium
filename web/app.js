@@ -1,4 +1,4 @@
-import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputRequirements, recipeIngredients, itemGroups, groupInfo, subgroupLabel, recipeGroup, recipeTitle, filterRecipes } from './model.js';
+import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputBelts, inputRequirements, recipeIngredients, itemGroups, groupInfo, subgroupLabel, recipeGroup, recipeTitle, filterRecipes } from './model.js';
 
 const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -110,7 +110,7 @@ async function api(path,options={}) {
 
 function request() {
   const recipe=state.catalog?.recipes.find(r=>r.name===$('recipe-select').value);
-  return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,secondary_inserter:recipeIngredients(recipe).length===2?$('secondary-inserter').value:null,pole:$('pole').value,common_input:$('common-input').checked,reverse_output:$('reverse-output').checked,output_chest:$('store-output').checked?$('output-chest').value:null,input_markers:$('input-markers').checked,max_machines_per_row:$('limit-machines').checked && $('max-machines').value?Number($('max-machines').value):null,max_row_width:$('limit-row-width').checked && $('max-row-width').value?Number($('max-row-width').value):null};
+  return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,secondary_inserter:recipeIngredients(recipe).length>=2?$('secondary-inserter').value:null,pole:$('pole').value,common_input:$('common-input').checked,reverse_output:$('reverse-output').checked,output_chest:$('store-output').checked?$('output-chest').value:null,input_markers:$('input-markers').checked,max_machines_per_row:$('limit-machines').checked && $('max-machines').value?Number($('max-machines').value):null,max_row_width:$('limit-row-width').checked && $('max-row-width').value?Number($('max-row-width').value):null};
 }
 function restoreOptions(r={}) {
   r=r || {};
@@ -135,7 +135,7 @@ function recipeChanged(preferredMachine=$('machine').value) {
   if(!recipe)return;
   populate('machine',recipe.machines,chooseMachine(recipe,preferredMachine));
   text('recipe-id',recipe.name);text('product-name',recipeTitle(recipe));$('product-icon').src=iconURL(recipe.product);
-  const ingredients=recipeIngredients(recipe),two=ingredients.length===2;
+  const ingredients=recipeIngredients(recipe),two=ingredients.length>=2;
   $('input-icon').src=iconURL(ingredients[0].item);text('input-label',ingredients.map(i=>label(i.item)).join(' + '));text('output-label',label(recipe.product));
   $('secondary-equipment').hidden=!two;$('secondary-inserter').disabled=!two;$('secondary-inserter').required=two;
   equipmentChanged();
@@ -229,7 +229,7 @@ function setArtifact(artifact,restoreForm=false) {
   text('metric-machines',number(f.machine_count,0));text('metric-machines-note',`Производственных рядов: ${number(f.rows.length,0)}`);
   const requirements=inputRequirements(f);
   $('metric-input').replaceChildren(document.createTextNode(number(requirements.reduce((sum,r)=>sum+r.supplied_per_second,0))),element('small','',' предм./с'));
-  text('metric-input-note',requirements.length===2?'2 ингредиента · запас 5%':'С запасом 5% к расчёту');
+  text('metric-input-note',requirements.length>=2?`${requirements.length} ингредиента · запас 5%`:'С запасом 5% к расчёту');
   text('metric-power',power(f.power.installed_power_watts));text('metric-power-note',`${f.power.pole_count} столбов · верхняя оценка нагрузки`);
   text('entity-count',`${f.document.blueprint.entities.length} сущностей`);
   text('canvas-caption',`${f.machine_count} машин · ${f.storage?.length ? `сундуков: ${f.storage.reduce((n,b)=>n+b.chests.length,0)}` : `выходных лент: ${outputPorts(f).length}`} · ${f.bus ? `входов шины: ${f.bus.lines.length} · ` : ''}${label(f.request.pole)}`);
@@ -282,7 +282,7 @@ function drawFactory(f) {
     bodyGroup.append(group);
   }
   for(const [a,,b] of f.document.blueprint.wires){const p=byID.get(a).position,q=byID.get(b).position;wireGroup.append(svg('path',{d:`M ${p.x} ${p.y} Q ${(p.x+q.x)/2} ${(p.y+q.y)/2+.3} ${q.x} ${q.y}`,fill:'none',stroke:'#dbb96d','stroke-opacity':.75,'stroke-width':.045}));}
-  for(const [ports,isOutput] of [[inputPorts(f),false],[f.storage?.length ? f.storage.map(b=>({...byID.get(b.chests[0]),storage:true,direction:f.request.reverse_output?12:4})) : outputPorts(f),true]]) {
+  for(const [ports,isOutput] of [[inputBelts(f),false],[f.storage?.length ? f.storage.map(b=>({...byID.get(b.chests[0]),storage:true,direction:f.request.reverse_output?12:4})) : outputPorts(f),true]]) {
     ports.forEach((port,i)=>{
       const x=port.position.x,y=port.position.y,color=isOutput?'#edbd65':'#85d9ba';
       const north=port.direction===8;
@@ -348,7 +348,7 @@ function inspect(id) {
 
 function renderPorts(f) {
   const outputs=outputPorts(f),inputs=inputPorts(f),requirements=inputRequirements(f);
-  $('ports-empty').hidden=true;$('ports-content').hidden=false;text('ports-count',String(inputs.length+outputs.length+1));
+  $('ports-empty').hidden=true;$('ports-content').hidden=false;text('ports-count',String(inputBelts(f).length+outputs.length+1));
   text('ports-input-name',requirements.map(r=>label(r.item)).join(' + '));text('ports-output-name',label(f.request.product));text('theoretical-input',requirements.map(r=>`${label(r.item)}: ${number(r.per_second)}/с`).join(' · '));
   const body=$('ports-body');body.replaceChildren();
   const add=(name,item,rate,position,kind,hint)=>{
@@ -356,7 +356,8 @@ function renderPorts(f) {
     const itemCell=element('td','',item);if(hint)itemCell.append(element('span','port-hint',hint));
     const rateCell=element('td','',rate),pointCell=element('td'),button=element('button','coordinate-button',`${number(position.x)}; ${number(position.y)}`);button.type='button';button.setAttribute('aria-label',`Показать на схеме: ${name}`);button.addEventListener('click',()=>focusPoint(position.x,position.y));pointCell.append(button);tr.append(nameCell,itemCell,rateCell,pointCell);body.append(tr);
   };
-  inputs.forEach((port,i)=>add(`Вход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',f.bus?`Шина ${port.direction===4?'с запада':'с севера'} · рядов: ${port.targets.length} · обе полосы`:`Ряд ${port.row_index} · ${port.ingredient_index===1?'дальняя':'ближняя'} лента · обе полосы`));
+  const inletIDs=inputBelts(f).map(port=>port.entity_number);
+  inputs.forEach(port=>add(`Вход ${inletIDs.indexOf(port.entity_number)+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',f.bus?`Шина ${port.direction===4?'с запада':'с севера'} · рядов: ${port.targets.length} · ${port.lanes==='both'?'обе полосы':port.lanes==='left'?'левая полоса':'правая полоса'}`:`Ряд ${port.row_index} · ${port.lanes==='both'?'обе полосы':port.lanes==='left'?'левая полоса':'правая полоса'}`));
   outputs.forEach((port,i)=>{
     const bank=f.storage?.find(b=>b.output_entity===port.entity_number),chest=bank && f.document.blueprint.entities.find(e=>e.entity_number===bank.chests[0]);
     const lanes=port.lanes==='both'?`Левая ${number(port.left_rate)}/с · правая ${number(port.right_rate)}/с`:`${port.lanes==='left'?'Левая':'Правая'} полоса`;

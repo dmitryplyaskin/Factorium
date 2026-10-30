@@ -1,6 +1,6 @@
 //! Physical production rows, including mirrored pairs with a shared output belt.
 
-use super::{BeltPort, FactoryRequest, ProductionRow, layout::LayoutSpec};
+use super::{BeltPort, FactoryRequest, ProductionRow, input_plan::InputPlan, layout::LayoutSpec};
 use crate::{blueprint::BlueprintDocument, model::Entity};
 
 pub(super) struct Production<'a> {
@@ -10,6 +10,7 @@ pub(super) struct Production<'a> {
     pub inputs: &'a [(String, f64)],
     pub output_amount: f64,
     pub secondary: Option<&'a Entity>,
+    pub input_plan: &'a InputPlan,
     pub arm_columns: &'a [u32],
     pub count: usize,
     pub planned: f64,
@@ -39,23 +40,49 @@ impl Production<'_> {
                 doc.blueprint.entities[(id - 1) as usize].recipe = Some(self.recipe.into());
             }
             ids.push(id);
-            for column in self.arm_columns {
-                for arm_y in [y - 1, y + h] {
-                    let input_y = if mirrored { y + h } else { y - 1 };
-                    let is_input = arm_y == input_y;
-                    let arm_name = match (is_input, self.secondary) {
-                        (true, Some(secondary)) if *column != self.arm_columns[0] => {
-                            secondary.prototype.name.as_str()
-                        }
-                        _ => self.request.inserter.as_str(),
-                    };
-                    let id = doc.add(
-                        arm_name,
-                        f64::from(x + *column as i32) + 0.5,
+            if self.inputs.len() == 3 {
+                let shared = self.input_plan.belt_count == 2;
+                let mut add_arm = |name: &str, column: i32, arm_y: i32, direction| {
+                    let arm = doc.add(
+                        name,
+                        f64::from(x + column) + 0.5,
                         f64::from(arm_y) + 0.5,
-                        if mirrored { 8 } else { 0 },
+                        direction,
                     );
-                    doc.blueprint.entities[(id - 1) as usize].override_stack_size = Some(1);
+                    doc.blueprint.entities[(arm - 1) as usize].override_stack_size = Some(1);
+                };
+                let long = &self.secondary.unwrap().prototype.name;
+                if shared {
+                    add_arm(&self.request.inserter, 0, y - 1, 0);
+                    add_arm(&self.request.inserter, 1, y - 1, 0);
+                    add_arm(long, w - 1, y - 1, 0);
+                } else {
+                    add_arm(&self.request.inserter, 0, y - 1, 0);
+                    add_arm(long, w - 1, y - 1, 0);
+                    add_arm(long, 1, y + h, 8);
+                }
+                for &column in self.arm_columns {
+                    add_arm(&self.request.inserter, column as i32, y + h, 0);
+                }
+            } else {
+                for column in self.arm_columns {
+                    for arm_y in [y - 1, y + h] {
+                        let input_y = if mirrored { y + h } else { y - 1 };
+                        let is_input = arm_y == input_y;
+                        let arm_name = match (is_input, self.secondary) {
+                            (true, Some(secondary)) if *column != self.arm_columns[0] => {
+                                secondary.prototype.name.as_str()
+                            }
+                            _ => self.request.inserter.as_str(),
+                        };
+                        let id = doc.add(
+                            arm_name,
+                            f64::from(x + *column as i32) + 0.5,
+                            f64::from(arm_y) + 0.5,
+                            if mirrored { 8 } else { 0 },
+                        );
+                        doc.blueprint.entities[(id - 1) as usize].override_stack_size = Some(1);
+                    }
                 }
             }
         }
@@ -85,16 +112,20 @@ impl Production<'_> {
         // Spread supply over all machines instead of nearly starving the last
         // row. Each lane then has a meaningful independently measurable target.
         let rate = self.planned * machines.len() as f64 / self.count as f64;
-        let mut ports: Vec<_> = inputs
+        let mut ports: Vec<_> = self
+            .inputs
             .iter()
-            .zip(self.inputs)
-            .map(|(&id, (item, amount))| BeltPort {
-                entity_number: id,
-                position: doc.blueprint.entities[(id - 1) as usize].position,
-                item: item.clone(),
-                rate: rate * amount / self.output_amount,
-                lanes: "both".into(),
-                direction: 4,
+            .enumerate()
+            .map(|(i, (item, amount))| {
+                let id = inputs[self.input_plan.belts[i]];
+                BeltPort {
+                    entity_number: id,
+                    position: doc.blueprint.entities[(id - 1) as usize].position,
+                    item: item.clone(),
+                    rate: rate * amount / self.output_amount,
+                    lanes: self.input_plan.lanes[i].into(),
+                    direction: 4,
+                }
             })
             .collect();
         let input = ports.remove(0);
@@ -129,7 +160,7 @@ impl Production<'_> {
         while remaining > 0 {
             let upper = remaining.min(spec.per_row);
             remaining -= upper;
-            let lower = if spec.paired {
+            let lower = if spec.paired && self.inputs.len() < 3 {
                 remaining.min(spec.per_row)
             } else {
                 0
@@ -139,8 +170,15 @@ impl Production<'_> {
             let upper_machines = self.machines(doc, upper, y, gap, false);
             let lower_y = y + h + 3;
             let lower_machines = self.machines(doc, lower, lower_y, gap, true);
-            let inputs = (0..self.inputs.len())
-                .map(|i| self.belt(doc, f64::from(y) - 1.5 - i as f64, width, 4).0)
+            let inputs = (0..self.input_plan.belt_count)
+                .map(|i| {
+                    let belt_y = if i == 2 {
+                        f64::from(y + h) + 2.5
+                    } else {
+                        f64::from(y) - 1.5 - i as f64
+                    };
+                    self.belt(doc, belt_y, width, 4).0
+                })
                 .collect();
             let output_line = self.belt(
                 doc,
@@ -156,7 +194,7 @@ impl Production<'_> {
             rows.push(self.row(doc, upper_machines, inputs, output, "right"));
             if lower > 0 {
                 let lower_width = lower as i32 * (w + gap) - gap;
-                let inputs = (0..self.inputs.len())
+                let inputs = (0..self.input_plan.belt_count)
                     .map(|i| {
                         self.belt(doc, f64::from(lower_y + h) + 1.5 + i as f64, lower_width, 4)
                             .0
@@ -164,7 +202,7 @@ impl Production<'_> {
                     .collect();
                 rows.push(self.row(doc, lower_machines, inputs, output, "left"));
             }
-            let input_belts = self.inputs.len() as i32;
+            let input_belts = self.input_plan.belt_count as i32;
             y += if lower > 0 {
                 2 * h + 5 + 2 * input_belts
             } else {

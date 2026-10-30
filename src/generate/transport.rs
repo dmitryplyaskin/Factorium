@@ -28,7 +28,7 @@ pub(super) fn validate(
         recipe.products[0].name == f.request.product && flow.ingredients[0].0 == f.input_item,
         "Input/output item mismatch"
     );
-    for (i, (r, (item, amount))) in requirements.iter().zip(&flow.ingredients).enumerate() {
+    for (r, (item, amount)) in requirements.iter().zip(&flow.ingredients) {
         ensure!(
             r.item == *item
                 && (r.per_second - f.request.rate * amount / flow.output).abs() < 1e-6
@@ -42,13 +42,13 @@ pub(super) fn validate(
             "Invalid ingredient inserter capacity"
         );
         ensure!(
-            inserter_reach(entity(data, &r.inserter)?, if i == 0 { 1 } else { 2 }),
+            inserter_reach(entity(data, &r.inserter)?, 1)
+                || inserter_reach(entity(data, &r.inserter)?, 2),
             "Ingredient inserter has incompatible pickup/drop reach"
         );
     }
     ensure!(
-        requirements[0].inserter == f.request.inserter
-            && (requirements[0].per_second - f.input_per_second).abs() < 1e-6
+        (requirements[0].per_second - f.input_per_second).abs() < 1e-6
             && (requirements[0].supplied_per_second - f.supplied_input_per_second).abs() < 1e-6,
         "Primary ingredient compatibility fields mismatch"
     );
@@ -157,6 +157,7 @@ pub(super) fn validate(
     let mut output_lanes = BTreeSet::new();
     let mut output_rate = 0.0;
     let mut input_rates = vec![0.0; requirements.len()];
+    let mut input_lanes = BTreeMap::<u32, BTreeSet<String>>::new();
     for row in &f.rows {
         let ports: Vec<_> = row.input_ports().collect();
         ensure!(
@@ -194,7 +195,17 @@ pub(super) fn validate(
                 port.rate.is_finite() && port.rate > 0.0 && port.item == requirements[i].item,
                 "Wrong or missing ingredient at input port"
             );
-            ensure!(port.lanes == "both", "Input must use both belt lanes");
+            ensure!(
+                matches!(port.lanes.as_str(), "both" | "left" | "right"),
+                "Invalid input lane"
+            );
+            let lanes = input_lanes.entry(port.entity_number).or_default();
+            ensure!(
+                !lanes.contains("both")
+                    && (port.lanes != "both" || lanes.is_empty())
+                    && lanes.insert(port.lanes.clone()),
+                "Input lane reused or overlaps a full belt"
+            );
             ensure!(
                 (port.rate - row.output.rate * flow.ingredients[i].1 / flow.output).abs() < 1e-6,
                 "Row violates recipe material balance for ingredient {}",
@@ -212,11 +223,16 @@ pub(super) fn validate(
                     .is_none_or(|n| path.len() <= n as usize),
                 "Row exceeds width limit in tiles"
             );
-            for &id in &path {
-                ensure!(
-                    used_belts.insert(id),
-                    "Input belt reused by another row, ingredient or output"
-                );
+            let shared = ports[..i]
+                .iter()
+                .any(|other| other.entity_number == port.entity_number);
+            if !shared {
+                for &id in &path {
+                    ensure!(
+                        used_belts.insert(id),
+                        "Input belt reused by another row, ingredient or output"
+                    );
+                }
             }
             input_lines.push(path);
             input_rates[i] += port.rate;
@@ -342,6 +358,7 @@ pub(super) fn validate(
                 arm.position.y.floor() as i32 + dy,
             );
             if let (Some(src), Some(dst)) = (occupied.get(&src_tile), occupied.get(&dst_tile)) {
+                let mut input_arm = false;
                 for (i, path) in input_lines.iter().enumerate() {
                     if path.contains(src) && row_machines.contains(dst) {
                         ensure!(
@@ -352,9 +369,12 @@ pub(super) fn validate(
                             touches_tile(*dst, dst_tile)?,
                             "Inserter cannot reach the machine's collision box"
                         );
-                        ensure!(used_arms.insert(id), "Inserter reused");
+                        input_arm = true;
                         *inputs[i].entry(*dst).or_default() += 1;
                     }
+                }
+                if input_arm {
+                    ensure!(used_arms.insert(id), "Inserter reused");
                 }
                 if row_machines.contains(src) && output_line.contains(dst) {
                     ensure!(
@@ -392,7 +412,7 @@ pub(super) fn validate(
         );
         for (i, port) in ports.iter().enumerate() {
             ensure!(
-                port.rate <= belt_speed + 1e-8,
+                port.rate <= belt_speed * if port.lanes == "both" { 1.0 } else { 0.5 } + 1e-8,
                 "Ingredient input exceeds belt capacity"
             );
             ensure!(
@@ -402,6 +422,20 @@ pub(super) fn validate(
                         + 1e-6,
                 "Row exceeds modelled inserter capacity for ingredient {}",
                 port.item
+            );
+        }
+        for (i, port) in ports.iter().enumerate() {
+            let combined: f64 = ports
+                .iter()
+                .filter(|p| p.entity_number == port.entity_number)
+                .map(|p| p.rate)
+                .sum();
+            ensure!(
+                combined
+                    <= inputs[i].values().sum::<usize>() as f64
+                        * requirements[i].inserter_items_per_second
+                        + 1e-6,
+                "Shared input exceeds combined inserter capacity"
             );
         }
         ensure!(

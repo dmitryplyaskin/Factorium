@@ -18,6 +18,7 @@ const labels = {
   'uranium-rounds-magazine':'Магазин с урановыми патронами','explosive-cannon-shell':'Разрывной снаряд',
   'constant-combinator':'Постоянный комбинатор','splitter':'Делитель','fast-splitter':'Быстрый делитель','underground-belt':'Подземный конвейер','fast-underground-belt':'Быстрый подземный конвейер',
   'iron-gear-wheel':'Железные шестерни','iron-plate':'Железные пластины','copper-plate':'Медные пластины',
+  'advanced-circuit':'Красные микросхемы','plastic-bar':'Пластмасса',
   'electronic-circuit':'Зелёные микросхемы','automation-science-pack':'Красные исследовательские пакеты',
   'copper-cable':'Медные провода','iron-ore':'Железная руда','copper-ore':'Медная руда','steel-plate':'Сталь',
   'iron-stick':'Железные прутья','pipe':'Трубы','barrel':'Пустые бочки','stone':'Камень','stone-brick':'Каменные блоки',
@@ -112,4 +113,13 @@ export function verificationState(job) {
   if (job?.status === 'complete') return job.report?.passed ? { text:'Проверено в игре', tone:'success' } : { text:'Проверка не пройдена', tone:'error' };
   if (job?.status === 'error') return { text:'Ошибка испытания', tone:'error' };
   return { text:'Схема проверена', tone:'neutral' };
+}
+
+// Keep material ports separate while counting and drawing each physical inlet once.
+export function inputBelts(factory) {
+  const seen=new Set();
+  return inputPorts(factory).filter(port=>{
+    if(seen.has(port.entity_number))return false;
+    seen.add(port.entity_number);return true;
+  });
 }

@@ -476,8 +476,8 @@ fn place_markers(
         let e = &mut doc.blueprint.entities[(id - 1) as usize];
         e.control_behavior = Some(marker_behavior(&p.item, p.rate));
         e.player_description = Some(format!(
-            "{}: {:.3} items/s; connect the marked input belt",
-            p.item, p.rate
+            "{}: {:.3} items/s; {} lane(s) relative to belt direction",
+            p.item, p.rate, p.lanes
         ));
         markers.push(InputMarker {
             entity_number: id,

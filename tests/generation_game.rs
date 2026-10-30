@@ -295,3 +295,49 @@ fn optional_infrastructure_transports_items_and_stores_real_output() -> Result<(
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "requires Factorio; cargo test --test generation_game three_ingredients -- --ignored --nocapture"]
+fn three_ingredients_work_on_shared_lanes_and_separate_belts() -> Result<()> {
+    let binary = discover_factorio()?;
+    let mut game = ExtractOptions::new(&binary);
+    game.mod_directory = discover_mod_directory(&binary);
+    let export = tempfile::tempdir()?;
+    let data = extract_game_data(&game, export.path())?;
+    for (rate, common) in [(0.5, false), (4.0, false), (0.5, true), (4.0, true)] {
+        let mut request = FactoryRequest::new("advanced-circuit", rate);
+        request.common_input = common;
+        request.reverse_output = common;
+        request.input_markers = true;
+        request.output_chest = common.then(|| "steel-chest".into());
+        let factory = generate_blueprint(&data, &request)?;
+        for row in &factory.rows {
+            assert_eq!(
+                row.input_ports()
+                    .map(|p| p.entity_number)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                if rate < 1.0 { 2 } else { 3 }
+            );
+        }
+        let options = SimulationOptions {
+            warmup_ticks: 300 * 60,
+            measurement_ticks: 600 * 60,
+        };
+        let report = verify_in_game(&data, &factory, &game, &options)?;
+        eprintln!(
+            "Three ingredients {rate}/s common={common}: {:.3}/s",
+            report.measured_output_per_second
+        );
+        assert!(report.passed, "{report:#?}");
+        assert_eq!(report.network_count, 1);
+        assert!(report.unpowered_entities.is_empty());
+        assert!(
+            report
+                .input_deliveries
+                .iter()
+                .all(|input| input.inserted_items > 0)
+        );
+    }
+    Ok(())
+}

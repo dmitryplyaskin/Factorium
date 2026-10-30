@@ -170,7 +170,7 @@ pub(super) fn place(
                     .map(|r| r.input_ports().nth(j).unwrap().rate)
                     .sum::<f64>()
                     + p.rate
-                    <= belt_rate * 0.85 + 1e-8
+                    <= belt_rate * if p.lanes == "both" { 0.85 } else { 0.425 } + 1e-8
             })
         });
         if !fits {
@@ -203,6 +203,14 @@ pub(super) fn place(
     let mut groups = Vec::new();
     for (i, partition) in partitions.iter().enumerate() {
         for j in 0..ingredients {
+            let first = partition[0].input_ports().nth(j).unwrap();
+            if partition[0]
+                .input_ports()
+                .take(j)
+                .any(|p| p.entity_number == first.entity_number)
+            {
+                continue;
+            }
             let mut ports: Vec<_> = partition
                 .iter()
                 .map(|r| r.input_ports().nth(j).unwrap().clone())
@@ -214,7 +222,12 @@ pub(super) fn place(
             ));
         }
     }
-    let west = groups.iter().map(|g| g.0).min().unwrap() - 3;
+    let collector_space = if request.reverse_output && ingredients == 3 {
+        outputs(rows).len() as i32
+    } else {
+        0
+    };
+    let west = groups.iter().map(|g| g.0).min().unwrap() - 3 - collector_space;
     let top = rows
         .iter()
         .flat_map(ProductionRow::input_ports)
@@ -249,7 +262,7 @@ pub(super) fn place(
                 position: route.doc.blueprint.entities[(source - 1) as usize].position,
                 item: ports[0].item.clone(),
                 rate: ports.iter().map(|p| p.rate).sum(),
-                lanes: "both".into(),
+                lanes: ports[0].lanes.clone(),
                 direction: 4,
             },
             targets: ports.iter().map(|p| p.entity_number).collect(),
@@ -271,6 +284,25 @@ pub(super) fn place(
                 .extend(begin as u32 + 1..=route.doc.blueprint.entities.len() as u32);
         }
     }
+    let mut shared_lines = Vec::new();
+    for line in &lines {
+        if line.source.lanes == "both" {
+            continue;
+        }
+        let peers: Vec<_> = rows
+            .iter()
+            .flat_map(ProductionRow::input_ports)
+            .filter(|p| line.targets.contains(&p.entity_number) && p.item != line.source.item)
+            .collect();
+        if !peers.is_empty() {
+            let mut other = line.clone();
+            other.source.item = peers[0].item.clone();
+            other.source.lanes = peers[0].lanes.clone();
+            other.source.rate = peers.iter().map(|p| p.rate).sum();
+            shared_lines.push(other);
+        }
+    }
+    lines.extend(shared_lines);
     Ok(InputBus {
         compact: true,
         splitter: splitter.prototype.name.clone(),
@@ -303,7 +335,11 @@ pub(super) fn collect_outputs(
     // Keep an empty tile after east-facing input belt ends so raw ingredients
     // cannot side-load onto the output collector of a full-width lower row.
     let column = if request.reverse_output {
-        -3
+        if rows[0].input_ports().count() == 3 {
+            west + ports.len() as i32 + 1
+        } else {
+            -3
+        }
     } else {
         right + 2
     };

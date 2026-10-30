@@ -364,3 +364,46 @@ async fn retains_independent_snapshots_and_bounds_the_session_history() {
     .await;
     assert_eq!(history["artifacts"].as_array().unwrap().len(), 20);
 }
+
+#[tokio::test]
+async fn three_ingredient_recipes_expose_materials_and_shared_lanes_through_the_api() {
+    let app = app();
+    let catalog = json_body(
+        app.clone()
+            .oneshot(request("GET", "/api/catalog", Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let recipe = catalog["recipes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "advanced-circuit")
+        .unwrap();
+    assert_eq!(recipe["ingredients"].as_array().unwrap().len(), 3);
+    let mut factory_request = FactoryRequest::new("advanced-circuit", 0.5);
+    factory_request.common_input = true;
+    let response = app
+        .oneshot(request(
+            "POST",
+            "/api/artifacts",
+            serde_json::to_value(factory_request).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let artifact = json_body(response).await;
+    let factory: factorium::GeneratedFactory =
+        serde_json::from_value(artifact["factory"].clone()).unwrap();
+    assert_eq!(factory.input_belt_count(), 2);
+    assert_eq!(factory.external_inputs().len(), 3);
+    assert_eq!(
+        factory
+            .external_inputs()
+            .iter()
+            .filter(|p| p.lanes != "both")
+            .count(),
+        2
+    );
+}

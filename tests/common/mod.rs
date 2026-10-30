@@ -67,10 +67,21 @@ pub fn catalog_value() -> Value {
             0.5,
             2.0,
         ),
+        (
+            "advanced-circuit",
+            vec![
+                ("electronic-circuit", 2.0),
+                ("copper-cable", 4.0),
+                ("plastic-bar", 2.0),
+            ],
+            6.0,
+            1.0,
+        ),
     ] {
         data["recipes"][name] = json!({"name":name,"type":"recipe","hidden":false,"enabled":true,"energy":time,"categories":["crafting"],"ingredients":ingredients.iter().map(|(item,amount)|json!({"type":"item","name":item,"amount":amount})).collect::<Vec<_>>(),"products":[{"type":"item","name":name,"amount":amount,"independent_probability":1.0,"shared_probability":{"min":0,"max":1}}]});
         data["items"][name] = json!({"name":name,"type":"item","hidden":false,"stack_size":100,"quality_stats":{"normal":{"spoil_ticks":0}}});
     }
+    data["items"]["plastic-bar"] = json!({"name":"plastic-bar","type":"item","hidden":false,"stack_size":100,"quality_stats":{"normal":{"spoil_ticks":0}}});
     for (name, w, h, speed, category) in [
         ("assembling-machine-2", 3, 3, 0.75, "crafting"),
         ("electric-furnace", 3, 3, 2.0, "smelting"),

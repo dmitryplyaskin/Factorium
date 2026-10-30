@@ -184,7 +184,7 @@ script.on_init(function()
         supplied_per_second = port.rate, measured_per_second = 0, inserted_items = 0}
       table.insert(report.input_deliveries, delivered_input)
       table.insert(state.inputs, {entity = real[port.entity_number], item = port.item, rate = port.rate,
-        credit = 0, lane = 1, measured = delivered_input})
+        credit = 0, lane = port.lanes == "right" and 2 or 1, measured = delivered_input})
     end
     table.insert(rows, state)
     local port = by_output[row.output.entity_number]
@@ -196,16 +196,16 @@ script.on_init(function()
     port.rows[lane] = state
   end
   local by_input = {}
-  for _, row in ipairs(rows) do for _, input in ipairs(row.inputs) do by_input[input.entity.unit_number] = input.measured end end
+  for _, row in ipairs(rows) do for _, input in ipairs(row.inputs) do by_input[input.entity.unit_number .. ":" .. input.item] = input.measured end end
   for _, port in ipairs(cfg.external_inputs) do
-    local measured = by_input[real[port.entity_number].unit_number]
+    local measured = by_input[real[port.entity_number].unit_number .. ":" .. port.item]
     if common_input then
       measured = {row_index = 0, input_entity = port.entity_number, item = port.item,
         supplied_per_second = port.rate, measured_per_second = 0, inserted_items = 0}
       table.insert(report.external_input_deliveries, measured)
     end
     table.insert(feeds, {entity = real[port.entity_number], item = port.item, rate = port.rate,
-      credit = 0, lane = 1, measured = measured})
+      credit = 0, lane = port.lanes == "right" and 2 or 1, both = port.lanes == "both", measured = measured})
   end
   for _, mapping in ipairs(cfg.observed_inserters or {}) do
     local entity = real[mapping.entity_number]
@@ -236,7 +236,7 @@ script.on_event(defines.events.on_tick, function()
     while input.credit >= 1 do
       local line = input.entity.get_transport_line(input.lane)
       if not line.insert_at_back({name = input.item, count = 1}) then break end
-      input.lane = 3 - input.lane
+      if input.both then input.lane = 3 - input.lane end
       input.credit = input.credit - 1
       inserted = inserted + 1
       if tick > opts.warmup_ticks then input.measured.inserted_items = input.measured.inserted_items + 1 end
@@ -247,14 +247,16 @@ script.on_event(defines.events.on_tick, function()
     local dropped = math.max(0, hand.last_count-count)
     if tick > opts.warmup_ticks and dropped > 0 then
       if hand.kind == "input" and common_input then
-        local input = hand.row.inputs[hand.input_index].measured
-        input.inserted_items = input.inserted_items+dropped
+        for _, input in ipairs(hand.row.inputs) do
+          if input.item == hand.last_item then input.measured.inserted_items = input.measured.inserted_items+dropped end
+        end
       elseif hand.kind == "output" and storage_mode then
         hand.row.measured.delivered_items = hand.row.measured.delivered_items+dropped
         hand.row.window_count = hand.row.window_count+dropped
       end
     end
     hand.last_count = count
+    if count > 0 then hand.last_item = hand.entity.held_stack.name end
   end
   for _, chest in ipairs(chests) do
     local count = chest.inventory.get_item_count(f.request.product)

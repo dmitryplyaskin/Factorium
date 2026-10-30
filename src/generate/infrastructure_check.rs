@@ -32,7 +32,10 @@ pub(super) fn validate(
         f.request.common_input == f.bus.is_some(),
         "Common input option/bus mismatch"
     );
-    let row_ports: HashMap<_, _> = f.input_ports().map(|p| (p.entity_number, p)).collect();
+    let row_ports: HashMap<_, _> = f
+        .input_ports()
+        .map(|p| ((p.entity_number, p.item.as_str()), p))
+        .collect();
     let mut claimed = BTreeSet::new();
     if let Some(bus) = &f.bus {
         let split = entity(data, &bus.splitter)?;
@@ -71,7 +74,14 @@ pub(super) fn validate(
             ensure!(
                 line.source.rate.is_finite()
                     && line.source.rate > 0.0
-                    && line.source.rate <= f.belt_items_per_second * 0.85 + 1e-8,
+                    && line.source.rate
+                        <= f.belt_items_per_second
+                            * if line.source.lanes == "both" {
+                                0.85
+                            } else {
+                                0.425
+                            }
+                            + 1e-8,
                 "Common input exceeds belt capacity"
             );
             let source = ids
@@ -87,7 +97,7 @@ pub(super) fn validate(
                         }
                     && line.source.direction == source.direction
                     && source.position == line.source.position
-                    && line.source.lanes == "both",
+                    && matches!(line.source.lanes.as_str(), "both" | "left" | "right"),
                 "Wrong common input position/direction"
             );
             let mut demand = 0.0;
@@ -98,10 +108,12 @@ pub(super) fn validate(
             );
             for target in &line.targets {
                 let p = row_ports
-                    .get(target)
+                    .get(&(*target, line.source.item.as_str()))
                     .context("Bus target is not a row input")?;
                 ensure!(
-                    claimed.insert(*target) && p.item == line.source.item,
+                    claimed.insert((*target, p.item.as_str()))
+                        && p.item == line.source.item
+                        && p.lanes == line.source.lanes,
                     "Bus duplicates a row input or mixes ingredients"
                 );
                 demand += p.rate;
@@ -214,8 +226,26 @@ pub(super) fn validate(
                     && targets.iter().all(|id| seen.contains(id)),
                 "Unreachable bus branches or unused transport entities"
             );
-            for id in route {
-                ensure!(used.belts.insert(id), "Bus entity reused by another line");
+            let shared = bus
+                .lines
+                .iter()
+                .take_while(|other| !std::ptr::eq(*other, line))
+                .find(|other| other.source.entity_number == line.source.entity_number);
+            if let Some(other) = shared {
+                ensure!(
+                    other.source.item != line.source.item
+                        && matches!(
+                            (other.source.lanes.as_str(), line.source.lanes.as_str()),
+                            ("left", "right") | ("right", "left")
+                        )
+                        && other.entities == line.entities
+                        && other.targets == line.targets,
+                    "Shared bus must preserve two distinct lanes over the same complete route"
+                );
+            } else {
+                for id in route {
+                    ensure!(used.belts.insert(id), "Bus entity reused by another line");
+                }
             }
         }
         ensure!(
@@ -335,14 +365,14 @@ pub(super) fn validate(
     for sign in &f.markers {
         let port = boundary
             .iter()
-            .find(|p| p.entity_number == sign.target_entity)
+            .find(|p| p.entity_number == sign.target_entity && p.item == sign.item)
             .context("Marker targets an internal/unknown port")?;
         let e = ids
             .get(&sign.entity_number)
             .context("Missing input marker")?;
         ensure!(
             f.request.input_markers
-                && marked.insert(port.entity_number)
+                && marked.insert((port.entity_number, port.item.as_str()))
                 && signs.insert(e.entity_number),
             "Duplicate or unexpected input marker"
         );

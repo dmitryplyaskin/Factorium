@@ -20,6 +20,7 @@ pub(super) struct Dimensions {
     pub max_per_row: usize,
     pub legacy_per_row: usize,
     pub input_belts: u32,
+    pub allow_paired: bool,
     pub machine_limit: Option<usize>,
     pub width_limit: Option<u32>,
     pub machine: [u32; 2],
@@ -79,6 +80,9 @@ impl Dimensions {
         let row_gaps: BTreeSet<_> = [0, self.pole[1], self.pole[1] + 4].into_iter().collect();
         let mut specs = Vec::new();
         for paired in [true, false] {
+            if paired && !self.allow_paired {
+                continue;
+            }
             for &per_row in &lengths {
                 let per_row = if paired {
                     per_row.min(self.count.div_ceil(2))

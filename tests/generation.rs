@@ -750,3 +750,61 @@ fn handles_furnace_selection_and_rejects_unsupported_mechanics() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn three_ingredients_select_lane_packing_from_supplied_flow() -> Result<()> {
+    let data = common::catalog();
+    for (rate, belt_count) in [(0.5, 2), (4.0, 3)] {
+        for common in [false, true] {
+            for reverse in [false, true] {
+                let mut request = FactoryRequest::new("advanced-circuit", rate);
+                request.common_input = common;
+                request.reverse_output = reverse;
+                request.input_markers = true;
+                request.output_chest = Some("steel-chest".into());
+                let f = generate_blueprint(&data, &request)?;
+                validate_factory(&data, &f)?;
+                assert_eq!(f.inputs.len(), 3);
+                if common && belt_count == 2 {
+                    assert_eq!(f.input_belt_count(), 2);
+                }
+                for row in &f.rows {
+                    let ports: Vec<_> = row.input_ports().collect();
+                    assert_eq!(ports.len(), 3);
+                    assert_eq!(
+                        ports
+                            .iter()
+                            .map(|p| p.entity_number)
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len(),
+                        belt_count
+                    );
+                    if belt_count == 2 {
+                        assert_eq!(ports.iter().filter(|p| p.lanes == "both").count(), 1);
+                        assert_eq!(ports.iter().filter(|p| p.lanes == "left").count(), 1);
+                        assert_eq!(ports.iter().filter(|p| p.lanes == "right").count(), 1);
+                    }
+                }
+                let restored = serde_json::from_value(serde_json::to_value(&f)?)?;
+                validate_factory(&data, &restored)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_reusing_or_overlapping_a_shared_input_lane() -> Result<()> {
+    let data = common::catalog();
+    let request = FactoryRequest::new("advanced-circuit", 0.5);
+    let f = generate_blueprint(&data, &request)?;
+    let mut broken = f.clone();
+    let row = &mut broken.rows[0];
+    let lane = row.input.lanes.clone();
+    row.additional_inputs[1].lanes = lane;
+    assert!(validate_factory(&data, &broken).is_err());
+    let mut broken = f.clone();
+    broken.rows[0].input.lanes = "both".into();
+    assert!(validate_factory(&data, &broken).is_err());
+    Ok(())
+}

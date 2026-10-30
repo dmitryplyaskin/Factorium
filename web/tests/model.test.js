@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {sameRequest,chooseMachine,verificationState,power,label,outputPorts,inputPorts,inputRequirements,recipeIngredients} from '../model.js';
+import {inputBelts,sameRequest,chooseMachine,verificationState,power,label,outputPorts,inputPorts,inputRequirements,recipeIngredients} from '../model.js';
 
 const request={product:'iron-gear-wheel',rate:5,recipe:'iron-gear-wheel',machine:'assembling-machine-2',belt:'transport-belt',inserter:'fast-inserter',pole:'small-electric-pole'};
 test('verification only belongs to the exact recipe, rate and equipment snapshot',()=>{
@@ -59,4 +59,15 @@ test('generation options invalidate snapshots while absent fields retain default
 test('bus exposes only external inlets and their row targets',()=>{
   const source={entity_number:100,item:'iron-plate',direction:8,rate:5.25};
   assert.deepEqual(inputPorts({bus:{lines:[{source,targets:[10,20]}]},rows:[]}),[{...source,targets:[10,20]}]);
+});
+
+test('three material ports retain lane assignments on two physical inlet belts',()=>{
+  const a={item:'plastic-bar',rate:1.05,entity_number:10,lanes:'left'},
+    b={item:'copper-cable',rate:2.1,entity_number:20,lanes:'both'},
+    c={item:'electronic-circuit',rate:1.05,entity_number:10,lanes:'right'};
+  const factory={rows:[{input:a,additional_inputs:[b,c]}]};
+  assert.equal(inputPorts(factory).length,3);
+  assert.deepEqual(inputPorts(factory).map(p=>p.lanes),['left','both','right']);
+  assert.deepEqual(inputBelts(factory).map(p=>p.entity_number),[10,20]);
+  assert.equal(inputBelts({rows:[],bus:{lines:[a,b,c].map(source=>({source,targets:[1]}))}}).length,2);
 });

@@ -3,6 +3,7 @@
 mod compact_bus;
 mod infrastructure;
 mod infrastructure_check;
+mod input_plan;
 mod layout;
 mod power;
 mod rows;
@@ -86,6 +87,8 @@ pub struct BeltPort {
     pub position: Position,
     pub item: String,
     pub rate: f64,
+    /// Material occupies both lanes, or only left/right relative to belt direction.
+    /// Two different materials may reference the same physical entity.
     pub lanes: String,
     #[serde(default = "east")]
     pub direction: u8,
@@ -224,6 +227,14 @@ impl GeneratedFactory {
             .unwrap_or_else(|| self.input_ports().cloned().collect())
     }
 
+    pub fn input_belt_count(&self) -> usize {
+        self.external_inputs()
+            .iter()
+            .map(|p| p.entity_number)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
     /// Physical output ports, with row contributions combined on shared belts.
     /// Each row's output still records its own rate and assigned lane.
     pub fn output_ports(&self) -> Vec<BeltPort> {
@@ -343,13 +354,33 @@ impl GeneratedFactory {
                 svg.push_str(&format!("<path d=\"M -0.25 0 L 0.25 0 L 0.05 -0.2 M 0.25 0 L 0.05 0.2\" transform=\"translate({} {}) rotate({})\" stroke=\"#f2df99\" fill=\"none\" stroke-width=\"0.06\"/>",e.position.x,e.position.y,i32::from(e.direction)*45/2-90));
             }
         }
-        for (i, port) in self.external_inputs().iter().enumerate() {
-            let item = port
-                .item
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
-            svg.push_str(&format!("<text x=\"{}\" y=\"{}\" fill=\"#85d9ba\" font-size=\"0.5\" text-anchor=\"end\">IN {}: {} {:.3}/s</text>",port.position.x-1.0,port.position.y-0.8,i+1,item,port.rate));
+        let boundary = self.external_inputs();
+        let mut inlets: Vec<Vec<&BeltPort>> = Vec::new();
+        for port in &boundary {
+            if let Some(group) = inlets
+                .iter_mut()
+                .find(|group| group[0].entity_number == port.entity_number)
+            {
+                group.push(port);
+            } else {
+                inlets.push(vec![port]);
+            }
+        }
+        for (i, group) in inlets.iter().enumerate() {
+            let port = group[0];
+            let materials = group
+                .iter()
+                .map(|port| {
+                    let item = port
+                        .item
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    format!("{item} ({}): {:.3}/s", port.lanes, port.rate)
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            svg.push_str(&format!("<text x=\"{}\" y=\"{}\" fill=\"#85d9ba\" font-size=\"0.5\" text-anchor=\"end\">IN {}: {materials}</text>", port.position.x-1.0, port.position.y-0.8, i+1));
         }
         svg.push_str("</svg>");
         svg
@@ -445,8 +476,8 @@ pub(crate) fn supported_recipe(
         r.prototype.name
     );
     ensure!(
-        (1..=2).contains(&r.ingredients.len()) && r.products.len() == 1,
-        "Recipe {} must have one or two ingredients and exactly one product",
+        (1..=3).contains(&r.ingredients.len()) && r.products.len() == 1,
+        "Recipe {} must have one to three ingredients and exactly one product",
         r.prototype.name
     );
     let b = &r.products[0];
@@ -497,14 +528,19 @@ pub(crate) fn supported_recipe(
     for a in &r.ingredients {
         stable_item(data, &a.name)?;
     }
-    if r.ingredients.len() == 2 {
+    if r.ingredients.len() >= 2 {
         ensure!(
-            r.ingredients[0].name != r.ingredients[1].name,
+            r.ingredients
+                .iter()
+                .map(|a| &a.name)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == r.ingredients.len(),
             "Ingredients must have distinct item types"
         );
         ensure!(
-            machine.tile_width >= 2 && machine.tile_height >= 2,
-            "Two-input template needs a machine at least 2x2 tiles"
+            machine.tile_width >= r.ingredients.len() as u32 && machine.tile_height >= 2,
+            "Multi-input template needs a machine at least as wide as its ingredient count and at least 2 tiles high"
         );
         ensure!(
             data.entities.values().any(|e| inserter_reach(e, 2)),
@@ -686,7 +722,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
         match candidates.as_slice() {
             [only] => *only,
             [] => bail!(
-                "No supported one/two-input recipe for {} on {}; specify --recipe for detailed diagnostics",
+                "No supported one/two/three-input recipe for {} on {}; specify --recipe for detailed diagnostics",
                 request.product,
                 request.machine
             ),
@@ -699,7 +735,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
     let flow = supported_recipe(data, recipe, machine)?;
     let (input_item, a) = &flow.ingredients[0];
     let b = flow.output;
-    let secondary = if flow.ingredients.len() == 2 {
+    let secondary = if flow.ingredients.len() >= 2 {
         let selected = if let Some(name) = &request.secondary_inserter {
             entity(data, name)?
         } else {
@@ -767,28 +803,41 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
     } else {
         0.0
     };
+    let belt_rate = belt_speed * 480.0;
+    let planned = request.rate * 1.05;
+    ensure!(planned.is_finite(), "Output rate is too large");
+    let input_plan = input_plan::InputPlan::new(&flow.ingredients, planned, b, belt_rate);
     let mut cell_rate = (crafts * b).min(transfer);
-    for (i, (_, amount)) in flow.ingredients.iter().enumerate() {
-        let input_transfer = if i == 1 {
+    for physical in 0..input_plan.belt_count {
+        let indices: Vec<_> = input_plan
+            .belts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &belt)| (belt == physical).then_some(i))
+            .collect();
+        let amount: f64 = indices.iter().map(|&i| flow.ingredients[i].1).sum();
+        let input_transfer = if input_plan.reaches[indices[0]] == 2 {
             secondary_rate
-        } else if secondary.is_some() {
-            arm_rate
-        } else {
+        } else if flow.ingredients.len() == 1 || indices.len() == 2 {
             transfer
+        } else {
+            arm_rate
         };
         cell_rate = cell_rate.min(input_transfer * b / amount);
     }
-    let belt_rate = belt_speed * 480.0;
-    let row_cap = flow
-        .ingredients
-        .iter()
-        .fold(belt_rate * 0.5 * 0.85, |cap, (_, amount)| {
-            cap.min(belt_rate * 0.85 * b / amount)
-        });
+    let row_cap = flow.ingredients.iter().enumerate().fold(
+        belt_rate * 0.5 * 0.85,
+        |cap, (i, (_, amount))| {
+            let lanes = if input_plan.lanes[i] == "both" {
+                1.0
+            } else {
+                0.5
+            };
+            cap.min(belt_rate * lanes * 0.85 * b / amount)
+        },
+    );
     let legacy_per_row = ((row_cap / cell_rate).floor() as usize).clamp(1, 8);
     let cell_rate = cell_rate.min(row_cap);
-    let planned = request.rate * 1.05;
-    ensure!(planned.is_finite(), "Output rate is too large");
     let count = (planned / cell_rate).ceil();
     ensure!(
         count <= 1024.0,
@@ -817,7 +866,8 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
             count,
             max_per_row,
             legacy_per_row,
-            input_belts: flow.ingredients.len() as u32,
+            input_belts: input_plan.belt_count as u32,
+            allow_paired: flow.ingredients.len() < 3,
             machine_limit: request.max_machines_per_row,
             width_limit: request.max_row_width,
             machine: [machine.tile_width, machine.tile_height],
@@ -835,6 +885,7 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                 inputs: &flow.ingredients,
                 output_amount: b,
                 secondary,
+                input_plan: &input_plan,
                 arm_columns: &arm_columns,
                 count,
                 planned,
@@ -931,8 +982,18 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                 power.connection_position.y,
                 power.installed_power_watts,
                 bus.as_ref()
-                    .map(|b| b.lines.len())
-                    .unwrap_or_else(|| rows.iter().map(|r| r.input_ports().count()).sum::<usize>()),
+                    .map(|b| b
+                        .lines
+                        .iter()
+                        .map(|l| l.source.entity_number)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len())
+                    .unwrap_or_else(|| rows
+                        .iter()
+                        .flat_map(ProductionRow::input_ports)
+                        .map(|p| p.entity_number)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()),
                 rows.iter()
                     .map(|r| r.output.entity_number)
                     .collect::<std::collections::BTreeSet<_>>()
@@ -975,12 +1036,16 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                         item: item.clone(),
                         per_second: request.rate * amount / b,
                         supplied_per_second: planned * amount / b,
-                        inserter: if i == 1 {
+                        inserter: if input_plan.reaches[i] == 2 {
                             secondary.unwrap().prototype.name.clone()
                         } else {
                             request.inserter.clone()
                         },
-                        inserter_items_per_second: if i == 1 { secondary_rate } else { arm_rate },
+                        inserter_items_per_second: if input_plan.reaches[i] == 2 {
+                            secondary_rate
+                        } else {
+                            arm_rate
+                        },
                     })
                     .collect(),
                 machine_count: count,

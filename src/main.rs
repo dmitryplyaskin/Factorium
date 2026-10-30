@@ -34,7 +34,7 @@ enum Commands {
         #[command(flatten)]
         game: GameArgs,
     },
-    /// Generate a solid recipe line with one or two ingredients and one product.
+    /// Generate a solid recipe line with one to three ingredients and one product.
     Generate {
         #[arg(long)]
         product: String,
@@ -48,7 +48,7 @@ enum Commands {
         belt: String,
         #[arg(long, default_value = "fast-inserter")]
         inserter: String,
-        /// Two-tile-reach inserter for a second ingredient (auto-selected by default).
+        /// Two-tile-reach inserter for far input belts (auto-selected by default).
         #[arg(long)]
         secondary_inserter: Option<String>,
         /// Route one or more shared inlet belts to the production rows.
@@ -279,7 +279,7 @@ fn main() -> Result<()> {
             );
             println!(
                 "Ports: {} input belts, {} output belts ({} using both lanes)",
-                factory.external_inputs().len(),
+                factory.input_belt_count(),
                 factory.output_ports().len(),
                 factory
                     .output_ports()
