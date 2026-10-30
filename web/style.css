@@ -55,7 +55,8 @@ main,.workbench,.workspace,.canvas-panel {display:contents}
 .viewport {position:fixed;inset:0;width:100%;height:100dvh;overflow:hidden;background:var(--bg);cursor:grab;isolation:isolate}
 .viewport:active {cursor:grabbing}
 .viewport:focus-visible {outline-offset:-3px}
-#factory-canvas {display:block;width:100%;height:100%;touch-action:none;user-select:none}
+#factory-underlay,.sprite-canvas {position:absolute;inset:0;display:block;width:100%;height:100%;pointer-events:none}
+#factory-canvas {position:relative;display:block;width:100%;height:100%;touch-action:none;user-select:none}
 #factory-canvas [data-entity] {cursor:pointer}
 #factory-canvas .selected>.entity-body {stroke:var(--amber);stroke-width:.13}
 .viewport.hide-power [data-layer=power],.viewport.hide-wires [data-layer=wires],.viewport.hide-ports [data-layer=ports],.viewport.hide-tunnels [data-layer=tunnels] {display:none}

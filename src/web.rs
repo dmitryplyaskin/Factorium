@@ -353,6 +353,7 @@ fn router(state: AppState) -> Router {
         .route("/model.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/model.js"))}))
         .route("/transport.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/transport.js"))}))
         .route("/entities.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/entities.js"))}))
+        .route("/renderer.js",get(||async{asset("text/javascript; charset=utf-8",include_str!("../web/renderer.js"))}))
         .route("/style.css",get(||async{asset("text/css; charset=utf-8",include_str!("../web/style.css"))}))
         .route("/favicon.svg",get(||async{asset("image/svg+xml",r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#efbe61"/><path d="M9 8h16v5H14v4h8v5h-8v5H9z" fill="#171b20"/></svg>"##)}))
         .route("/api/catalog",get(catalog))

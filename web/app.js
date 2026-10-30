@@ -1,10 +1,11 @@
 import { label, number, power, sameRequest, chooseMachine, verificationState, outputPorts, inputPorts, inputBelts, inputRequirements, recipeIngredients, itemGroups, groupInfo, subgroupLabel, recipeGroup, recipeTitle, filterRecipes } from './model.js';
 import { transportLayout, transportSymbols, transportTile, transportDevice, transportPalette, directionLabel } from './transport.js';
 import { entitySymbols, entitySprite, wirePoint, inputMarkerBadge } from './entities.js';
+import { SpriteRenderer } from './renderer.js';
 
 const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
-const state = { catalog:null, artifact:null, generating:false, poll:null, clock:null, history:[], view:null, fitted:null, drag:null, selected:null, stringCache:new Map() };
+const state = { catalog:null, artifact:null, generating:false, poll:null, clock:null, history:[], view:null, fitted:null, drag:null, selected:null, renderer:null, stringCache:new Map() };
 let toastTimer;
 let activePanel=null, panelTrigger=null, recipeFilter='all', interfaceHidden=false;
 
@@ -244,10 +245,15 @@ function drawFactory(f) {
   const requirements=inputRequirements(f);
   const graphics=state.catalog.entity_graphics;
   const entities=f.document.blueprint.entities,byID=new Map(entities.map(e=>[e.entity_number,e]));
-  document.querySelector('.legend-belt').style.backgroundColor=transportPalette(f.request.belt).rail;
-  const scene=$('scene');scene.replaceChildren(transportSymbols(svg,f.request.belt,state.catalog.transport_sprites),entitySymbols(svg,graphics,entities),svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
-  const powerGroup=svg('g',{'data-layer':'power'}),wireGroup=svg('g',{'data-layer':'wires'}),tunnelGroup=svg('g',{'data-layer':'tunnels','pointer-events':'none'}),transportGroup=svg('g'),shadowGroup=svg('g'),bodyGroup=svg('g'),armGroup=svg('g'),portsGroup=svg('g',{'data-layer':'ports'});
   const transport=transportLayout(entities,f.request.belt,f.bus);
+  state.renderer?.destroy();
+  const renderer=new SpriteRenderer(f,state.catalog,transport);state.renderer=renderer;
+  if(renderer.enabled)$('factory-canvas').before(renderer.node);
+  const svgSprites=renderer.enabled?[]:state.catalog.transport_sprites;
+  document.querySelector('.legend-belt').style.backgroundColor=transportPalette(f.request.belt).rail;
+  const scene=$('scene');scene.replaceChildren(transportSymbols(svg,f.request.belt,svgSprites),...(renderer.enabled?[]:[entitySymbols(svg,graphics,entities)]));
+  $('underlay').replaceChildren(svg('rect',{x:-100000,y:-100000,width:200000,height:200000,fill:'url(#grid)'}));
+  const powerGroup=svg('g',{'data-layer':'power'}),wireGroup=svg('g',{'data-layer':'wires'}),tunnelGroup=svg('g',{'data-layer':'tunnels','pointer-events':'none'}),transportGroup=svg('g'),shadowGroup=svg('g'),bodyGroup=svg('g'),armGroup=svg('g'),portsGroup=svg('g',{'data-layer':'ports'});
   for(const {input,output} of transport.tunnels){
     const a=input.position,b=output.position,d=`M ${a.x} ${a.y} L ${b.x} ${b.y}`;
     tunnelGroup.append(svg('path',{d,fill:'none',stroke:'#0c1117','stroke-width':.15}));
@@ -262,8 +268,12 @@ function drawFactory(f) {
     const radius=isPole ? Math.max(w/2,f.power.supply_area_distance) : w/2;
     x0=Math.min(x0,x-radius);x1=Math.max(x1,x+radius);y0=Math.min(y0,y-(isPole?radius:h/2));y1=Math.max(y1,y+(isPole?radius:h/2));
     if(isPole){const r=f.power.supply_area_distance;powerGroup.append(svg('rect',{x:x-r,y:y-r,width:2*r,height:2*r,fill:'#91d9ad','fill-opacity':.035,stroke:'#91d9ad','stroke-opacity':.23,'stroke-width':.045}));}
+    const raster=renderer.bounds.get(e.entity_number);
+    if(raster){
+      x0=Math.min(x0,raster.left);y0=Math.min(y0,raster.top);x1=Math.max(x1,raster.right);y1=Math.max(y1,raster.bottom);continue;
+    }
     const group=svg('g',{'data-entity':e.entity_number});group.append(svg('title',{},`${label(e.name)} · #${e.entity_number}${e.name===f.request.belt || e.name===f.bus?.splitter || e.name===f.bus?.underground?` · ${directionLabel(e.direction)}${e.type?` · ${e.type==='input'?'Вход под землю':'Выход на поверхность'}`:''}`:''}`));
-    const native=entitySprite(svg,e,graphics,w,h);
+    const native=renderer.enabled?null:entitySprite(svg,e,graphics,w,h);
     if(native){
       group.append(native.body,native.hitbox);shadowGroup.append(native.shadow);armGroup.append(native.arm);
       x0=Math.min(x0,native.bounds.left);y0=Math.min(y0,native.bounds.top);x1=Math.max(x1,native.bounds.right);y1=Math.max(y1,native.bounds.bottom);
@@ -271,9 +281,9 @@ function drawFactory(f) {
       group.append(svg('rect',{class:'entity-body',x:x-w/2+.06,y:y-h/2+.06,width:w-.12,height:h-.12,rx:.14,fill:'#24453e',stroke:'#70ad99','stroke-width':.06}));
       const size=Math.min(w,h)*.64;group.append(svg('image',{href:iconURL(e.name),x:x-size/2,y:y-size/2,width:size,height:size,'pointer-events':'none'}));
     } else if(e.name===f.request.belt){
-      group.append(...transportTile(svg,e,transport.belts.get(e.entity_number),state.catalog.transport_sprites));
+      group.append(...transportTile(svg,e,transport.belts.get(e.entity_number),svgSprites));
     } else if(e.name===f.bus?.splitter || e.name===f.bus?.underground){
-      group.append(...transportDevice(svg,e,{splitter:f.bus.splitter,belt:f.request.belt,w,h,sprites:state.catalog.transport_sprites}));
+      group.append(...transportDevice(svg,e,{splitter:f.bus.splitter,belt:f.request.belt,w,h,sprites:svgSprites}));
     } else if(e.name==='constant-combinator'){
       group.append(svg('rect',{class:'entity-body',x:x-.45,y:y-.45,width:.9,height:.9,rx:.08,fill:'#3c4e63',stroke:'#b6c9e2','stroke-width':.06}));
       group.append(svg('image',{href:iconURL(e.name),x:x-.35,y:y-.35,width:.7,height:.7,'pointer-events':'none'}));
@@ -326,15 +336,38 @@ function drawFactory(f) {
       y0=Math.min(y0,position.y-1);y1=Math.max(y1,position.y);
     });
   });
-  scene.append(powerGroup,tunnelGroup,transportGroup,shadowGroup,bodyGroup,armGroup,wireGroup,portsGroup);
+  $('underlay').append(powerGroup,tunnelGroup);
+  scene.append(transportGroup,shadowGroup,bodyGroup,armGroup,wireGroup,portsGroup);
   const bounds={x:x0-8,y:y0-3,w:x1-x0+16,h:y1-y0+6};
   state.fitted=bounds;fit();
 }
 
+let viewFrame=0;
 function applyView() {
-  if(!state.view)return;const v=state.view;$('factory-canvas').setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
-  $('factory-canvas').classList.toggle('transport-small',$('viewport').clientWidth/v.w<12);
-  text('zoom-level',`${Math.round((state.fitWidth || state.fitted.w)/v.w*100)}%`);
+  if(!state.view || viewFrame)return;
+  measureViewPresentation();
+  viewFrame=requestAnimationFrame(()=>{
+    viewFrame=0;const v=state.view,width=$('viewport').clientWidth,height=$('viewport').clientHeight;
+    $('factory-canvas').setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
+    $('factory-underlay').setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
+    $('factory-canvas').classList.toggle('transport-small',width/v.w<12);
+    state.renderer?.update(v,width,height);
+    text('zoom-level',`${Math.round((state.fitWidth || state.fitted.w)/v.w*100)}%`);
+  });
+}
+let presentationPending=false;
+const presentationSamples=[];
+function measureViewPresentation(){
+  if(presentationPending)return;
+  presentationPending=true;const start=performance.now();
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    presentationPending=false;
+    presentationSamples.push(+(performance.now()-start).toFixed(2));
+    if(presentationSamples.length>30)presentationSamples.shift();
+    $('factory-canvas').dataset.presentationSamples=JSON.stringify(presentationSamples);
+    if(performance.getEntriesByName('blueprint-view-present').length>=120)performance.clearMeasures('blueprint-view-present');
+    performance.measure('blueprint-view-present',{start,end:performance.now()});
+  }));
 }
 function fit(){
   if(!state.fitted)return;
@@ -356,8 +389,8 @@ function zoom(factor,at){
   state.view={x:anchor.x-(anchor.x-v.x)/factor,y:anchor.y-(anchor.y-v.y)/factor,w,h};applyView();
 }
 function screenPoint(event) {
-  const p=$('factory-canvas').createSVGPoint();p.x=event.clientX;p.y=event.clientY;
-  return p.matrixTransform($('factory-canvas').getScreenCTM().inverse());
+  const rect=$('factory-canvas').getBoundingClientRect(),v=state.view;
+  return {x:v.x+(event.clientX-rect.left)*v.w/rect.width,y:v.y+(event.clientY-rect.top)*v.h/rect.height};
 }
 function focusPoint(x,y) {
   closePanel(false);
@@ -368,6 +401,7 @@ function inspect(id) {
   const f=state.artifact?.factory,e=f?.document.blueprint.entities.find(e=>e.entity_number===id);if(!e)return;
   $('factory-canvas').querySelector('.selected')?.classList.remove('selected');
   $('factory-canvas').querySelector(`[data-entity="${id}"]`)?.classList.add('selected');
+  state.selected=id;state.renderer?.select(id);
   text('inspector-kind',`СУЩНОСТЬ #${id}`);text('inspector-name',label(e.name));
   let detail=`x ${number(e.position.x)} · y ${number(e.position.y)}`;
   if(e.name===f.request.pole)detail+=`\nПитание: ${number(f.power.supply_area_distance*2)} × ${number(f.power.supply_area_distance*2)} · провод: ${number(f.power.max_wire_distance)}`;
@@ -538,12 +572,28 @@ for(const button of document.querySelectorAll('[data-rate]'))button.addEventList
 for(const [id,layer] of [['show-power','power'],['show-wires','wires'],['show-ports','ports'],['show-tunnels','tunnels']])$(id).addEventListener('change',()=>$('viewport').classList.toggle(`hide-${layer}`,!$(id).checked));
 $('zoom-in').addEventListener('click',()=>zoom(1.3));$('zoom-out').addEventListener('click',()=>zoom(1/1.3));$('zoom-fit').addEventListener('click',fit);
 $('factory-canvas').addEventListener('wheel',event=>{if(!state.view)return;event.preventDefault();zoom(event.deltaY<0?1.12:1/1.12,screenPoint(event));},{passive:false});
-$('factory-canvas').addEventListener('pointerdown',event=>{if(!state.view || event.button!==0)return;const p=screenPoint(event);state.drag={id:event.pointerId,start:p,view:{...state.view},clientX:event.clientX,clientY:event.clientY,target:event.target.closest('[data-entity]')?.dataset.entity};$('factory-canvas').setPointerCapture(event.pointerId);});
-$('factory-canvas').addEventListener('pointermove',event=>{if(!state.drag || state.drag.id!==event.pointerId)return;const transform=$('factory-canvas').getScreenCTM(),dx=(event.clientX-state.drag.clientX)/transform.a,dy=(event.clientY-state.drag.clientY)/transform.d;state.view={...state.drag.view,x:state.drag.view.x-dx,y:state.drag.view.y-dy};applyView();});
-$('factory-canvas').addEventListener('pointerup',event=>{if(!state.drag)return;const d=state.drag;state.drag=null;if(Math.hypot(event.clientX-d.clientX,event.clientY-d.clientY)<4 && d.target)inspect(Number(d.target));});
-$('factory-canvas').addEventListener('pointercancel',()=>state.drag=null);
+$('factory-canvas').addEventListener('pointerdown',event=>{
+  if(!state.view || event.button!==0)return;
+  const p=screenPoint(event);
+  state.drag={id:event.pointerId,start:p,view:{...state.view},scale:$('viewport').clientWidth/state.view.w,clientX:event.clientX,clientY:event.clientY,
+    target:event.target.closest('[data-entity]')?.dataset.entity ?? state.renderer?.hit(p)};
+  state.renderer?.hover(null);$('factory-canvas').style.cursor='grabbing';$('factory-canvas').setPointerCapture(event.pointerId);
+});
+$('factory-canvas').addEventListener('pointermove',event=>{
+  if(!state.view)return;
+  if(!state.drag){
+    const id=event.target.closest('[data-entity]')?.dataset.entity ?? state.renderer?.hit(screenPoint(event));
+    state.renderer?.hover(id?Number(id):null);$('factory-canvas').style.cursor=id?'pointer':'';return;
+  }
+  if(state.drag.id!==event.pointerId)return;
+  const dx=(event.clientX-state.drag.clientX)/state.drag.scale,dy=(event.clientY-state.drag.clientY)/state.drag.scale;
+  state.view={...state.drag.view,x:state.drag.view.x-dx,y:state.drag.view.y-dy};applyView();
+});
+$('factory-canvas').addEventListener('pointerup',event=>{if(!state.drag)return;const d=state.drag;state.drag=null;$('factory-canvas').style.cursor='';if(Math.hypot(event.clientX-d.clientX,event.clientY-d.clientY)<4 && d.target)inspect(Number(d.target));});
+$('factory-canvas').addEventListener('pointercancel',()=>{state.drag=null;$('factory-canvas').style.cursor='';});
+$('factory-canvas').addEventListener('pointerleave',()=>state.renderer?.hover(null));
 $('viewport').addEventListener('keydown',event=>{if(!state.view)return;const v=state.view,step=v.w*.07;const keys={ArrowLeft:[-step,0],ArrowRight:[step,0],ArrowUp:[0,-step],ArrowDown:[0,step]};if(keys[event.key]){event.preventDefault();const [x,y]=keys[event.key];state.view={...v,x:v.x+x,y:v.y+y};applyView();}else if(['+','=','-','0'].includes(event.key)){event.preventDefault();if(event.key==='0')fit();else zoom(event.key==='-'?1/1.3:1.3);}});
-$('close-inspector').addEventListener('click',()=>{$('entity-inspector').hidden=true;$('factory-canvas').querySelector('.selected')?.classList.remove('selected');});
+$('close-inspector').addEventListener('click',()=>{$('entity-inspector').hidden=true;$('factory-canvas').querySelector('.selected')?.classList.remove('selected');state.selected=null;state.renderer?.select(null);});
 $('verify-button').addEventListener('click',verify);$('copy-button').addEventListener('click',()=>copyBlueprint());$('export-button').addEventListener('click',openExport);$('dialog-copy-button').addEventListener('click',()=>copyBlueprint(true));
 $('help-button').addEventListener('click',()=>$('help-dialog').showModal());
 for(const button of document.querySelectorAll('[data-close-dialog]'))button.addEventListener('click',()=>button.closest('dialog').close());
