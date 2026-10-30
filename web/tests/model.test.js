@@ -50,3 +50,13 @@ test('two ingredients retain distinct ports, demands and row associations',()=>{
   assert.equal(inputRequirements({input_item:'iron-plate',input_per_second:2,supplied_input_per_second:2.1,request}).length,1);
   assert.equal(recipeIngredients({ingredients:requirements}).length,2);
 });
+
+test('generation options invalidate snapshots while absent fields retain defaults',()=>{
+  assert.equal(sameRequest(request,{...request,common_input:false,input_markers:false,output_chest:null,max_machines_per_row:null,max_row_width:null}),true);
+  for(const [key,value] of Object.entries({common_input:true,input_markers:true,output_chest:'steel-chest',max_machines_per_row:4,max_row_width:20}))assert.equal(sameRequest(request,{...request,[key]:value}),false);
+  assert.equal(sameRequest({...request,max_row_width:'20'},{...request,max_row_width:20}),true);
+});
+test('bus exposes only external inlets and their row targets',()=>{
+  const source={entity_number:100,item:'iron-plate',direction:8,rate:5.25};
+  assert.deepEqual(inputPorts({bus:{lines:[{source,targets:[10,20]}]},rows:[]}),[{...source,targets:[10,20]}]);
+});

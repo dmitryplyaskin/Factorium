@@ -52,7 +52,16 @@ pub fn validate_factory(data: &GameData, f: &GeneratedFactory) -> Result<()> {
             }
             machines.insert(e.entity_number);
         } else if e.name == f.request.belt {
-            ensure!(e.direction == 4, "Belt must face east");
+            ensure!(
+                e.direction == 4 || (f.request.common_input && matches!(e.direction, 0 | 8 | 12)),
+                "Belt has unsupported direction"
+            );
+            belts.insert(e.entity_number);
+        } else if f
+            .bus
+            .as_ref()
+            .is_some_and(|b| e.name == b.splitter || e.name == b.underground)
+        {
             belts.insert(e.entity_number);
         } else if e.name == f.request.inserter || requirements.iter().any(|r| r.inserter == e.name)
         {
@@ -68,6 +77,10 @@ pub fn validate_factory(data: &GameData, f: &GeneratedFactory) -> Result<()> {
         } else if e.name == f.request.pole {
             ensure!(e.direction == 0, "Unsupported pole direction");
             poles.insert(e.entity_number, e);
+        } else if Some(e.name.as_str()) == f.request.output_chest.as_deref()
+            || (f.request.input_markers && e.name == "constant-combinator")
+        {
+            // Exact membership and geometry are checked by infrastructure_check.
         } else {
             anyhow::bail!("Unexpected entity in single-recipe layout: {}", e.name);
         }
@@ -112,6 +125,10 @@ pub fn validate_factory(data: &GameData, f: &GeneratedFactory) -> Result<()> {
     ensure!(
         entry.position == f.power.connection_position,
         "Power connector position mismatch"
+    );
+    ensure!(
+        graph[&entry.entity_number].len() < 5,
+        "External power entry has no spare copper connection"
     );
     let mut seen = HashSet::new();
     let mut queue = VecDeque::from([entry.entity_number]);

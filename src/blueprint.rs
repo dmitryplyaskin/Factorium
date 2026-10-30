@@ -35,6 +35,12 @@ pub struct BlueprintEntity {
     pub recipe: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_stack_size: Option<u32>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub belt_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_behavior: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_description: Option<String>,
 }
 
 impl BlueprintDocument {
@@ -77,6 +83,9 @@ impl BlueprintDocument {
             direction,
             recipe: None,
             override_stack_size: None,
+            belt_type: None,
+            control_behavior: None,
+            player_description: None,
         });
         id
     }

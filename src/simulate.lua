@@ -1,6 +1,9 @@
 -- cfg is injected as JSON, not interpolated executable source.
 local f, opts = cfg.factory, cfg.options
 local ingredients = cfg.inputs
+local common_input = f.bus ~= nil
+local storage_mode = #(f.storage or {}) > 0
+local feeds, observed, chests = {}, {}, {}
 local real, rows, outputs, surface, start_tick
 local inserted, delivered = 0, 0
 local windows, window_count = {}, 0
@@ -8,7 +11,10 @@ local report = {
   passed = false, game_version = script.active_mods.base, mods = {},
   entity_count = 0, pole_count = 0, network_count = 0, unpowered_entities = {},
   measured_output_per_second = 0, window_rates = {}, delivered_items = 0,
-  inserted_items = 0, input_deliveries = {}, row_outputs = {}, warmup_ticks = opts.warmup_ticks,
+  inserted_items = 0, input_deliveries = {}, external_input_deliveries = {}, storage_deliveries = {}, row_outputs = {}, warmup_ticks = opts.warmup_ticks,
+  input_measurement_location = common_input and "machines" or "boundary",
+  output_measurement_location = storage_mode and "chests" or "belts",
+  row_measurement_location = storage_mode and "before-storage" or "boundary",
   measurement_ticks = opts.measurement_ticks, machine_status_counts = {}, errors = {}
 }
 for name, version in pairs(script.active_mods) do report.mods[name] = version end
@@ -91,6 +97,18 @@ script.on_init(function()
   if math.abs(prototypes.entity[f.request.belt].belt_speed * 480 - f.belt_items_per_second) > 1e-8 then fail("Belt speed differs from the catalog") end
   local pole_proto = prototypes.entity[f.request.pole]
   if math.abs(pole_proto.get_supply_area_distance("normal") - f.power.supply_area_distance) > 1e-8 or math.abs(pole_proto.get_max_wire_distance("normal") - f.power.max_wire_distance) > 1e-8 then fail("Pole supply area or wire reach differs from the catalog") end
+  if #report.errors > 0 then finish(); return end
+  for _, marker in ipairs(f.markers or {}) do
+    local cb = real[marker.entity_number].get_control_behavior()
+    local section = cb and cb.get_section(1)
+    local slot = section and section.get_slot(1)
+    if not slot or not slot.value or slot.value.name ~= marker.item or slot.min ~= math.ceil(marker.rate) then
+      fail("Input marker signal was lost during blueprint import")
+    end
+    if real[marker.entity_number].combinator_description ~= f.document.blueprint.entities[marker.entity_number].player_description then
+      fail("Input marker description was lost during blueprint import")
+    end
+  end
   if #report.errors > 0 then finish(); return end
   inventory.destroy()
   local networks = {}
@@ -177,6 +195,28 @@ script.on_init(function()
     end
     port.rows[lane] = state
   end
+  local by_input = {}
+  for _, row in ipairs(rows) do for _, input in ipairs(row.inputs) do by_input[input.entity.unit_number] = input.measured end end
+  for _, port in ipairs(cfg.external_inputs) do
+    local measured = by_input[real[port.entity_number].unit_number]
+    if common_input then
+      measured = {row_index = 0, input_entity = port.entity_number, item = port.item,
+        supplied_per_second = port.rate, measured_per_second = 0, inserted_items = 0}
+      table.insert(report.external_input_deliveries, measured)
+    end
+    table.insert(feeds, {entity = real[port.entity_number], item = port.item, rate = port.rate,
+      credit = 0, lane = 1, measured = measured})
+  end
+  for _, mapping in ipairs(cfg.observed_inserters or {}) do
+    local entity = real[mapping.entity_number]
+    table.insert(observed, {entity = entity, row = rows[mapping.row_index], kind = mapping.kind,
+      input_index = mapping.input_index, last_count = 0})
+  end
+  for _, bank in ipairs(f.storage or {}) do for _, id in ipairs(bank.chests) do
+    local measured = {chest_entity = id, stored_items = 0, added_items = 0}
+    table.insert(report.storage_deliveries, measured)
+    table.insert(chests, {inventory = real[id].get_inventory(defines.inventory.chest), measured = measured, previous = 0})
+  end end
   start_tick = game.tick
 end)
 
@@ -191,8 +231,7 @@ script.on_event(defines.events.on_tick, function()
     end
     if #report.unpowered_entities > 0 then fail("Some consumers have no connection to the external electricity supply") end
   end
-  for _, row in ipairs(rows) do
-    for _, input in ipairs(row.inputs) do
+  for _, input in ipairs(feeds) do
     input.credit = math.min(input.credit + input.rate / 60, input.rate + 2)
     while input.credit >= 1 do
       local line = input.entity.get_transport_line(input.lane)
@@ -202,10 +241,33 @@ script.on_event(defines.events.on_tick, function()
       inserted = inserted + 1
       if tick > opts.warmup_ticks then input.measured.inserted_items = input.measured.inserted_items + 1 end
     end
+  end
+  for _, hand in ipairs(observed) do
+    local count = hand.entity.held_stack.valid_for_read and hand.entity.held_stack.count or 0
+    local dropped = math.max(0, hand.last_count-count)
+    if tick > opts.warmup_ticks and dropped > 0 then
+      if hand.kind == "input" and common_input then
+        local input = hand.row.inputs[hand.input_index].measured
+        input.inserted_items = input.inserted_items+dropped
+      elseif hand.kind == "output" and storage_mode then
+        hand.row.measured.delivered_items = hand.row.measured.delivered_items+dropped
+        hand.row.window_count = hand.row.window_count+dropped
+      end
     end
+    hand.last_count = count
+  end
+  for _, chest in ipairs(chests) do
+    local count = chest.inventory.get_item_count(f.request.product)
+    local added = count-chest.previous
+    if tick > opts.warmup_ticks then
+      chest.measured.added_items = chest.measured.added_items+added
+      delivered = delivered+added; window_count = window_count+added
+    end
+    chest.previous = count; chest.measured.stored_items = count
   end
   -- Read each physical output once. Shared-belt lanes belong to different rows;
   -- total throughput alone must never conceal a stalled half of a pair.
+  if not storage_mode then
   for _, port in ipairs(outputs) do
     for lane = 1, 2 do
       local line = port.entity.get_transport_line(lane)
@@ -222,6 +284,7 @@ script.on_event(defines.events.on_tick, function()
       end
     end
   end
+  end
   if tick > opts.warmup_ticks and (tick-opts.warmup_ticks) % (opts.measurement_ticks/4) == 0 then
     table.insert(windows, window_count * 60 / (opts.measurement_ticks/4)); window_count = 0
     for _, row in ipairs(rows) do
@@ -237,8 +300,14 @@ script.on_event(defines.events.on_tick, function()
     if report.measured_output_per_second + 1e-8 < f.request.rate then fail("Measured boundary output is below the requested rate") end
     for _, input in ipairs(report.input_deliveries) do
       input.measured_per_second = input.inserted_items * 60 / opts.measurement_ticks
-      if input.inserted_items == 0 or input.measured_per_second + 60 / opts.measurement_ticks + 1e-8 < input.supplied_per_second / 1.05 then
+      if input.inserted_items == 0 or (not common_input and input.measured_per_second + 60 / opts.measurement_ticks + 1e-8 < input.supplied_per_second / 1.05) then
         fail("Ingredient " .. input.item .. " at row " .. input.row_index .. " received less than its requested share")
+      end
+    end
+    for _, input in ipairs(report.external_input_deliveries) do
+      input.measured_per_second = input.inserted_items * 60 / opts.measurement_ticks
+      if input.inserted_items == 0 or input.measured_per_second + 60 / opts.measurement_ticks + 1e-8 < input.supplied_per_second / 1.05 then
+        fail("Shared input belt received less than its requested supply: " .. input.item)
       end
     end
     for _, row in ipairs(rows) do
@@ -246,7 +315,9 @@ script.on_event(defines.events.on_tick, function()
       result.measured_per_second = result.delivered_items * 60 / opts.measurement_ticks
       -- One item of measurement quantization is allowed, but every row must
       -- actually deliver something, including a short final row of an odd pair.
-      if result.delivered_items == 0 or result.measured_per_second + 60 / opts.measurement_ticks + 1e-8 < result.target_per_second then
+      -- Passive splitters redistribute flow between rows. Only the aggregate
+      -- target applies in bus mode, but a completely stalled row still fails.
+      if result.delivered_items == 0 or (not common_input and result.measured_per_second + 60 / opts.measurement_ticks + 1e-8 < result.target_per_second) then
         fail("Row " .. result.row_index .. " (" .. result.lane .. " lane) is below its requested share; increase measurement duration if necessary")
       end
     end

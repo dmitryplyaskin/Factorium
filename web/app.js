@@ -25,7 +25,18 @@ async function api(path,options={}) {
 
 function request() {
   const recipe=state.catalog?.recipes.find(r=>r.name===$('recipe-select').value);
-  return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,secondary_inserter:recipeIngredients(recipe).length===2?$('secondary-inserter').value:null,pole:$('pole').value};
+  return {product:recipe?.product || '',rate:Number($('rate').value),recipe:recipe?.name || null,machine:$('machine').value,belt:$('belt').value,inserter:$('inserter').value,secondary_inserter:recipeIngredients(recipe).length===2?$('secondary-inserter').value:null,pole:$('pole').value,common_input:$('common-input').checked,output_chest:$('store-output').checked?$('output-chest').value:null,input_markers:$('input-markers').checked,max_machines_per_row:$('limit-machines').checked && $('max-machines').value?Number($('max-machines').value):null,max_row_width:$('limit-row-width').checked && $('max-row-width').value?Number($('max-row-width').value):null};
+}
+function restoreOptions(r={}) {
+  $('common-input').checked=Boolean(r.common_input);$('input-markers').checked=Boolean(r.input_markers);
+  $('store-output').checked=Boolean(r.output_chest);if(r.output_chest)$('output-chest').value=r.output_chest;
+  $('limit-machines').checked=Boolean(r.max_machines_per_row);$('max-machines').value=r.max_machines_per_row || 8;$('limit-row-width').checked=Boolean(r.max_row_width);$('max-row-width').value=r.max_row_width || 20;optionsChanged();
+}
+function optionsChanged() {
+  $('storage-equipment').hidden=!$('store-output').checked;$('output-chest').disabled=!$('store-output').checked;
+  for(const [toggle,settings,field] of [['limit-machines','machine-limit-settings','max-machines'],['limit-row-width','row-width-settings','max-row-width']]) {
+    const limited=$(toggle).checked;$(settings).hidden=!limited;$(field).disabled=!limited;$(field).required=limited;
+  }
 }
 function dirty() {return state.artifact && !sameRequest(request(),state.artifact.factory.request);}
 function populate(id,options,value) {
@@ -49,6 +60,7 @@ function equipmentChanged() {
   const machine=find('machines','machine'),belt=find('belts','belt'),pole=find('poles','pole');
   text('machine-detail',machine ? `${machine.width} × ${machine.height} тайла · скорость ${number(machine.speed)}×` : '');
   text('belt-detail',belt ? `${number(belt.belt_rate)} предм./с · ${number(belt.belt_rate/2)} на полосу` : '');
+  $('max-row-width').min=String((machine?.width || 2)+4);
   text('pole-detail',pole ? `Зона ${number(pole.supply_radius*2)} × ${number(pole.supply_radius*2)} · провод до ${number(pole.wire_reach)} тайла` : '');
   updateState();
 }
@@ -69,6 +81,7 @@ async function initialize() {
     populate('inserter',catalog.inserters,saved?.inserter || 'fast-inserter');
     populate('secondary-inserter',catalog.long_inserters || [],saved?.secondary_inserter || 'long-handed-inserter');
     populate('pole',catalog.poles,saved?.pole || 'small-electric-pole');
+    populate('output-chest',catalog.chests || [],saved?.output_chest || 'steel-chest');restoreOptions(saved);
     if(saved?.rate>0 && Number.isFinite(saved.rate))$('rate').value=String(saved.rate);
     recipeChanged(saved?.machine || 'assembling-machine-2');
     text('recipe-count',`${recipes.length} доступно`);
@@ -116,7 +129,7 @@ function setArtifact(artifact,restoreForm=false) {
   showError('generation-error','');
   stopPolling();state.artifact=artifact;state.selected=null;$('entity-inspector').hidden=true;
   const f=artifact.factory;
-  if(restoreForm){populate('recipe-select',state.catalog.recipes.map(r=>({name:r.name})).sort((a,b)=>label(a.name).localeCompare(label(b.name),'ru')),f.request.recipe);$('rate').value=f.request.rate;recipeChanged(f.request.machine);for(const key of ['belt','inserter','pole'])$(key).value=f.request[key];if(f.request.secondary_inserter)$('secondary-inserter').value=f.request.secondary_inserter;equipmentChanged();persist();}
+  if(restoreForm){populate('recipe-select',state.catalog.recipes.map(r=>({name:r.name})).sort((a,b)=>label(a.name).localeCompare(label(b.name),'ru')),f.request.recipe);$('rate').value=f.request.rate;recipeChanged(f.request.machine);for(const key of ['belt','inserter','pole'])$(key).value=f.request[key];if(f.request.secondary_inserter)$('secondary-inserter').value=f.request.secondary_inserter;restoreOptions(f.request);equipmentChanged();persist();}
   text('result-title',label(f.request.product));
   $('metric-output').replaceChildren(document.createTextNode(number(f.request.rate)),element('small','',' предм./с'));
   text('metric-output-note','Цель · выпуск не ниже заданного');
@@ -126,7 +139,7 @@ function setArtifact(artifact,restoreForm=false) {
   text('metric-input-note',requirements.length===2?'2 ингредиента · запас 5%':'С запасом 5% к расчёту');
   text('metric-power',power(f.power.installed_power_watts));text('metric-power-note',`${f.power.pole_count} столбов · верхняя оценка нагрузки`);
   text('entity-count',`${f.document.blueprint.entities.length} сущностей`);
-  text('canvas-caption',`${f.machine_count} машин · выходных лент: ${outputPorts(f).length} · ${label(f.request.pole)} · ${number(f.power.supply_area_distance*2)} × ${number(f.power.supply_area_distance*2)} тайлов питания`);
+  text('canvas-caption',`${f.machine_count} машин · ${f.storage?.length ? `сундуков: ${f.storage.reduce((n,b)=>n+b.chests.length,0)}` : `выходных лент: ${outputPorts(f).length}`} · ${f.bus ? `входов шины: ${f.bus.lines.length} · ` : ''}${label(f.request.pole)}`);
   $('canvas-empty').hidden=true;
   drawFactory(f);renderPorts(f);renderVerification();updateState();
   if(artifact.verification.status==='running')startPolling(artifact.id);
@@ -150,7 +163,19 @@ function drawFactory(f) {
       const size=Math.min(w,h)*.64;group.append(svg('image',{href:iconURL(e.name),x:x-size/2,y:y-size/2,width:size,height:size,'pointer-events':'none'}));
     } else if(e.name===f.request.belt){
       group.append(svg('rect',{class:'entity-body',x:x-.47,y:y-.47,width:.94,height:.94,rx:.05,fill:'#7d683b',stroke:'#b39859','stroke-width':.035}));
-      group.append(svg('path',{d:`M ${x-.27} ${y-.29} L ${x+.06} ${y-.29} L ${x-.08} ${y-.4} M ${x-.27} ${y+.21} L ${x+.12} ${y+.21} L ${x-.02} ${y+.1}`,fill:'none',stroke:'#dbbd73','stroke-width':.07,'pointer-events':'none'}));
+      group.append(svg('path',{transform:`rotate(${(e.direction || 0)*22.5-90} ${x} ${y})`,d:`M ${x-.27} ${y-.29} L ${x+.06} ${y-.29} L ${x-.08} ${y-.4} M ${x-.27} ${y+.21} L ${x+.12} ${y+.21} L ${x-.02} ${y+.1}`,fill:'none',stroke:'#dbbd73','stroke-width':.07,'pointer-events':'none'}));
+    } else if(e.name===f.bus?.splitter || e.name===f.bus?.underground){
+      const underground=e.name===f.bus.underground;
+      group.append(svg('rect',{class:'entity-body',x:x-w/2+.05,y:y-h/2+.05,width:w-.1,height:h-.1,rx:.08,fill:underground?'#5b4d38':'#867440',stroke:'#e4c87d','stroke-width':.06}));
+      group.append(svg('image',{href:iconURL(e.name),x:x-w*.43,y:y-h*.43,width:w*.86,height:h*.86,'pointer-events':'none'}));
+      if(underground)group.append(svg('text',{x,y:y+.17,'text-anchor':'middle','font-size':.45,fill:'#fff','pointer-events':'none'},e.type==='input'?'↓':'↑'));
+    } else if(e.name==='constant-combinator'){
+      const marker=f.markers?.find(m=>m.entity_number===e.entity_number);
+      group.append(svg('rect',{class:'entity-body',x:x-.45,y:y-.45,width:.9,height:.9,rx:.08,fill:'#3c4e63',stroke:'#b6c9e2','stroke-width':.06}));
+      group.append(svg('image',{href:iconURL(marker?.item || e.name),x:x-.35,y:y-.35,width:.7,height:.7,'pointer-events':'none'}));
+    } else if(e.name===f.request.output_chest){
+      group.append(svg('rect',{class:'entity-body',x:x-.44,y:y-.44,width:.88,height:.88,rx:.06,fill:'#5d4839',stroke:'#d6aa82','stroke-width':.06}));
+      group.append(svg('image',{href:iconURL(e.name),x:x-.39,y:y-.39,width:.78,height:.78,'pointer-events':'none'}));
     } else if(e.name===f.request.inserter || requirements.some(r=>r.inserter===e.name)){
       const long=e.name!==f.request.inserter,reach=long?1.62:.62,color=long?'#e6a182':'#91b5d9';
       group.append(svg('rect',{class:'entity-body',x:x-.23,y:y-.23,width:.46,height:.46,rx:.1,fill:long?'#634037':'#304967',stroke:color,'stroke-width':.06}));
@@ -164,12 +189,17 @@ function drawFactory(f) {
     bodyGroup.append(group);
   }
   for(const [a,,b] of f.document.blueprint.wires){const p=byID.get(a).position,q=byID.get(b).position;wireGroup.append(svg('path',{d:`M ${p.x} ${p.y} Q ${(p.x+q.x)/2} ${(p.y+q.y)/2+.3} ${q.x} ${q.y}`,fill:'none',stroke:'#dbb96d','stroke-opacity':.75,'stroke-width':.045}));}
-  for(const [ports,isOutput] of [[inputPorts(f),false],[outputPorts(f),true]]) {
+  for(const [ports,isOutput] of [[inputPorts(f),false],[f.storage?.length ? f.storage.map(b=>({...byID.get(b.chests[0]),storage:true})) : outputPorts(f),true]]) {
     ports.forEach((port,i)=>{
       const x=port.position.x,y=port.position.y,color=isOutput?'#edbd65':'#85d9ba';
-      portsGroup.append(svg('path',{d:isOutput?`M ${x+.5} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`:`M ${x-2.2} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`,fill:'none',stroke:color,'stroke-width':.09}));
-      portsGroup.append(svg('text',{x:isOutput?x+2.5:x-2.5,y:y+.16,'text-anchor':isOutput?'start':'end',fill:color,'font-size':.52,'font-family':'Segoe UI, sans-serif'},`${isOutput?'Выход':'Вход'} ${i+1}`));
+      const north=port.direction===8;
+      portsGroup.append(svg('path',{d:north?`M ${x} ${y-2.2} v 1.7 m -.3 -.5 l .3 .5 .3 -.5`:isOutput?`M ${x+.5} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`:`M ${x-2.2} ${y} h 1.7 m -.5 -.3 l .5 .3 -.5 .3`,fill:'none',stroke:color,'stroke-width':.09}));
+      portsGroup.append(svg('text',{x:north?x:isOutput?x+2.5:x-2.5,y:north?y-2.7:y+.16,'text-anchor':north?'middle':isOutput?'start':'end',fill:color,'font-size':.52,'font-family':'Segoe UI, sans-serif'},`${port.storage?'Склад':isOutput?'Выход':'Вход'} ${i+1}`));
     });
+  }
+  for(const marker of f.markers || []) {
+    const a=byID.get(marker.entity_number).position,b=byID.get(marker.target_entity).position;
+    portsGroup.append(svg('path',{d:`M ${a.x} ${a.y} L ${b.x} ${b.y}`,fill:'none',stroke:'#a5bce1','stroke-width':.055,'stroke-dasharray':'.15 .15'}));
   }
   const p=f.power.connection_position;
   portsGroup.append(svg('circle',{cx:p.x,cy:p.y,r:.65,fill:'none',stroke:'#c9b5ec','stroke-width':.08,'stroke-dasharray':'.15 .12'}));
@@ -205,6 +235,7 @@ function inspect(id) {
   let detail=`x ${number(e.position.x)} · y ${number(e.position.y)}`;
   if(e.name===f.request.pole)detail+=`\nПитание: ${number(f.power.supply_area_distance*2)} × ${number(f.power.supply_area_distance*2)} · провод: ${number(f.power.max_wire_distance)}`;
   else if(e.name===f.request.machine)detail+=`\n${f.recipe}`;
+  const marker=f.markers?.find(m=>m.entity_number===id);if(marker)detail+=`\n${label(marker.item)} · ${number(marker.rate)}/с · вход #${marker.target_entity}`;
   text('inspector-detail',detail);$('entity-inspector').hidden=false;
 }
 
@@ -218,8 +249,11 @@ function renderPorts(f) {
     const itemCell=element('td','',item);if(hint)itemCell.append(element('span','port-hint',hint));
     const rateCell=element('td','',rate),pointCell=element('td'),button=element('button','coordinate-button',`${number(position.x)}; ${number(position.y)}`);button.type='button';button.setAttribute('aria-label',`Показать на схеме: ${name}`);button.addEventListener('click',()=>focusPoint(position.x,position.y));pointCell.append(button);tr.append(nameCell,itemCell,rateCell,pointCell);body.append(tr);
   };
-  inputs.forEach((port,i)=>add(`Вход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',`Ряд ${port.row_index} · ${port.ingredient_index===1?'дальняя':'ближняя'} лента · обе полосы`));
-  outputs.forEach((port,i)=>add(`Выход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'output',port.lanes==='both'?`Левая ${number(port.left_rate)}/с · правая ${number(port.right_rate)}/с`:`${port.lanes==='left'?'Левая':'Правая'} полоса · продолжение на восток`));
+  inputs.forEach((port,i)=>add(`Вход ${i+1}`,label(port.item),`${number(port.rate)} /с`,port.position,'input',f.bus?`Шина с севера · рядов: ${port.targets.length} · обе полосы`:`Ряд ${port.row_index} · ${port.ingredient_index===1?'дальняя':'ближняя'} лента · обе полосы`));
+  outputs.forEach((port,i)=>{
+    const bank=f.storage?.find(b=>b.output_entity===port.entity_number),chest=bank && f.document.blueprint.entities.find(e=>e.entity_number===bank.chests[0]);
+    add(bank?`Склад ${i+1}`:`Выход ${i+1}`,label(port.item),`${number(port.rate)} /с`,chest?.position || port.position,'output',bank?`${bank.chests.length} × ${label(f.request.output_chest)} · до заполнения` : port.lanes==='both'?`Левая ${number(port.left_rate)}/с · правая ${number(port.right_rate)}/с`:`${port.lanes==='left'?'Левая':'Правая'} полоса · продолжение на восток`);
+  });
   add('Питание',`Столб #${f.power.connection_entity}`,`до ${power(f.power.installed_power_watts)}`,f.power.connection_position,'power','Подключите к внешней электросети');
 }
 
@@ -237,7 +271,8 @@ function renderLaneMeasurements(report,factory) {
   section.replaceChildren();section.hidden=!report.row_outputs?.length;
   if(section.hidden)return;
   section.open=report.row_outputs.length<=4;
-  section.append(element('summary','',`Выпуск по рядам и полосам · ${report.row_outputs.length}`));
+  section.append(element('summary','',`Выпуск по рядам ${report.row_measurement_location==='before-storage'?'до склада':''} · ${report.row_outputs.length}`));
+  if(factory.bus)section.append(element('p','field-hint','Плановая доля ряда — ориентир. Делители перераспределяют поток; проверяются общий выпуск и работа каждого ряда.'));
   const scroll=element('div','table-scroll'),table=element('table'),head=element('thead'),header=element('tr');
   for(const name of ['Выход','Ряд / полоса','Цель, /с','Измерено, /с']){const th=element('th','',name);th.scope='col';header.append(th);}
   head.append(header);table.append(head);const body=element('tbody'),ports=outputPorts(factory);
@@ -250,11 +285,23 @@ function renderInputMeasurements(report) {
   if(!section){section=element('details','simulation-settings');section.id='ingredient-results';$('verification-results').append(section);}
   section.replaceChildren();section.hidden=!report.input_deliveries?.length;
   if(section.hidden)return;
-  section.open=report.input_deliveries.length<=4;section.append(element('summary','',`Подача ингредиентов · входов: ${report.input_deliveries.length}`));
+  section.open=report.input_deliveries.length<=4;section.append(element('summary','',report.input_measurement_location==='machines'?'Подача на шину и в машины':`Подача ингредиентов на входы · ${report.input_deliveries.length}`));
   const scroll=element('div','table-scroll'),table=element('table'),head=element('thead'),header=element('tr');
-  for(const name of ['Предмет','Ряд','Подача, /с','Измерено, /с']){const th=element('th','',name);th.scope='col';header.append(th);}
+  for(const name of ['Предмет','Подключение / ряд','Подача, /с','Измерено, /с']){const th=element('th','',name);th.scope='col';header.append(th);}
   head.append(header);table.append(head);const body=element('tbody');
-  for(const input of report.input_deliveries){const tr=element('tr');for(const value of [label(input.item),input.row_index,number(input.supplied_per_second),number(input.measured_per_second)])tr.append(element('td','',value));body.append(tr);}
+  for(const [i,input] of [...(report.external_input_deliveries || []),...report.input_deliveries].entries()){const tr=element('tr');for(const value of [label(input.item),input.row_index?`Ряд ${input.row_index}`:`Вход ${i+1}`,number(input.supplied_per_second),number(input.measured_per_second)])tr.append(element('td','',value));body.append(tr);}
+  table.append(body);scroll.append(table);section.append(scroll);
+}
+
+function renderStorageMeasurements(report) {
+  let section=$('storage-results');
+  if(!section){section=element('details','simulation-settings');section.id='storage-results';$('verification-results').append(section);}
+  section.replaceChildren();section.hidden=!report.storage_deliveries?.length;if(section.hidden)return;
+  section.append(element('summary','',`Содержимое сундуков · ${report.storage_deliveries.length}`));
+  const scroll=element('div','table-scroll'),table=element('table'),head=element('thead'),header=element('tr');
+  for(const name of ['Сундук','Добавлено за измерение','Всего накоплено']){const th=element('th','',name);th.scope='col';header.append(th);}
+  head.append(header);table.append(head);const body=element('tbody');
+  for(const chest of report.storage_deliveries){const tr=element('tr');for(const value of [`#${chest.chest_entity}`,number(chest.added_items,0),number(chest.stored_items,0)])tr.append(element('td','',value));body.append(tr);}
   table.append(body);scroll.append(table);section.append(scroll);
 }
 
@@ -265,9 +312,9 @@ function renderVerification() {
   $('verification-dot').className=`tab-status-dot ${running?'running':report?(report.passed?'success':'error'):job?.status==='error'?'error':''}`;
   $('verify-button').querySelector('span').textContent=running?'Проверяем…':report || job?.status==='error'?'Проверить ещё раз':'Проверить в Factorio';
   showError('verification-errors',job?.error || report?.errors?.join('\n') || '');
-  if(report){text('measured-rate',`${number(report.measured_output_per_second)} /с`);text('measured-target',`Цель: ≥ ${number(artifact.factory.request.rate)} предм./с`);text('network-count',number(report.network_count,0));text('powered-count',report.unpowered_entities.length?`${report.unpowered_entities.length} сущностей без питания`:'Все потребители запитаны');text('delivered-count',number(report.delivered_items,0));text('measurement-note',`За ${number(report.measurement_ticks/60,0)} игровых секунд`);renderChart(report.window_rates,artifact.factory.request.rate);}
+  if(report){text('measured-rate',`${number(report.measured_output_per_second)} /с`);text('measured-target',`Цель: ≥ ${number(artifact.factory.request.rate)} предм./с`);text('network-count',number(report.network_count,0));text('powered-count',report.unpowered_entities.length?`${report.unpowered_entities.length} сущностей без питания`:'Все потребители запитаны');text('delivered-count',number(report.delivered_items,0));text('measurement-note',`${report.output_measurement_location==='chests'?'Добавлено в сундуки':'На выходных лентах'} · ${number(report.measurement_ticks/60,0)} игровых секунд`);renderChart(report.window_rates,artifact.factory.request.rate);}
   if(report)renderLaneMeasurements(report,artifact.factory);
-  if(report)renderInputMeasurements(report);
+  if(report){renderInputMeasurements(report);renderStorageMeasurements(report);}
   clearInterval(state.clock);state.clock=null;
   if(running){const update=()=>text('verification-elapsed',`${Math.max(0,Math.floor((Date.now()-job.started_at)/1000))} с`);update();state.clock=setInterval(update,1000);}
   updateState();
@@ -332,7 +379,7 @@ function activateTab(name,focus=false) {
 }
 
 $('factory-form').addEventListener('submit',generate);
-$('factory-form').addEventListener('input',()=>{updateState();persist();});
+$('factory-form').addEventListener('input',()=>{optionsChanged();updateState();persist();});
 $('recipe-select').addEventListener('change',()=>{recipeChanged();persist();});
 for(const id of ['machine','belt','inserter','secondary-inserter','pole'])$(id).addEventListener('change',()=>{equipmentChanged();persist();});
 for(const button of document.querySelectorAll('[data-rate]'))button.addEventListener('click',()=>{$('rate').value=button.dataset.rate;updateState();persist();});

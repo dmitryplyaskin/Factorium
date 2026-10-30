@@ -5,6 +5,139 @@ use std::io::Read;
 use anyhow::Result;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use factorium::{FactoryRequest, generate_blueprint, validate_factory};
+
+#[test]
+fn optional_bus_storage_markers_and_both_row_limits_are_validated() -> Result<()> {
+    let data = common::catalog();
+    let mut r = FactoryRequest::new("electronic-circuit", 1.0);
+    r.pole = "substation".into();
+    r.common_input = true;
+    r.output_chest = Some("steel-chest".into());
+    r.input_markers = true;
+    r.max_machines_per_row = Some(4);
+    r.max_row_width = Some(14);
+    let f = generate_blueprint(&data, &r)?;
+    validate_factory(&data, &f)?;
+    assert!(
+        f.rows.iter().all(|row| row.machines.len() <= 4
+            && row.output.position.x - row.input.position.x + 1.0 <= 14.0)
+    );
+    assert_eq!(f.external_inputs().len(), 2);
+    assert_eq!(f.markers.len(), 2);
+    assert_eq!(f.storage.len(), f.output_ports().len());
+    for need in f.input_requirements() {
+        let supplied: f64 = f
+            .external_inputs()
+            .iter()
+            .filter(|p| p.item == need.item)
+            .map(|p| p.rate)
+            .sum();
+        assert!((supplied - need.supplied_per_second).abs() < 1e-8);
+    }
+    let entities = &f.document.blueprint.entities;
+    let entry = f.power.connection_position;
+    let x0 = entities
+        .iter()
+        .map(|e| e.position.x - f64::from(f.entity_sizes[&e.name][0]) / 2.0)
+        .fold(f64::INFINITY, f64::min);
+    let x1 = entities
+        .iter()
+        .map(|e| e.position.x + f64::from(f.entity_sizes[&e.name][0]) / 2.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let y0 = entities
+        .iter()
+        .map(|e| e.position.y - f64::from(f.entity_sizes[&e.name][1]) / 2.0)
+        .fold(f64::INFINITY, f64::min);
+    let y1 = entities
+        .iter()
+        .map(|e| e.position.y + f64::from(f.entity_sizes[&e.name][1]) / 2.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let [w, h] = f.entity_sizes[&r.pole];
+    let exit = (entry.x - x0).min(x1 - entry.x) + f64::from(w) / 2.0 + 1.0;
+    let exit = exit.min((entry.y - y0).min(y1 - entry.y) + f64::from(h) / 2.0 + 1.0);
+    assert!(exit <= f.power.max_wire_distance);
+    let original = f.clone();
+    let mut bad = f.clone();
+    let id = bad.bus.as_ref().unwrap().lines[0].source.entity_number;
+    bad.document.blueprint.entities[(id - 1) as usize].direction = 0;
+    assert!(validate_factory(&data, &bad).is_err());
+    let mut bad = original.clone();
+    let id = bad.storage[0].inserters[0];
+    bad.document.blueprint.entities[(id - 1) as usize].direction ^= 8;
+    assert!(validate_factory(&data, &bad).is_err());
+    let mut bad = original.clone();
+    let id = bad.markers[0].entity_number;
+    bad.document.blueprint.entities[(id - 1) as usize].control_behavior = None;
+    assert!(validate_factory(&data, &bad).is_err());
+    let mut bad = original;
+    bad.request.max_machines_per_row = Some(1);
+    assert!(validate_factory(&data, &bad).is_err());
+    for limit in [0, 65] {
+        r.max_machines_per_row = Some(limit);
+        assert!(generate_blueprint(&data, &r).is_err());
+    }
+    r.max_machines_per_row = None;
+    r.max_row_width = Some(6);
+    assert!(generate_blueprint(&data, &r).is_err());
+    Ok(())
+}
+
+#[test]
+fn large_bus_flows_keep_ingredient_partitions_and_crossings_intact() -> Result<()> {
+    let data = common::catalog();
+    let mut r = FactoryRequest::new("electronic-circuit", 5.0);
+    r.pole = "substation".into();
+    r.common_input = true;
+    r.max_machines_per_row = Some(4);
+    let f = generate_blueprint(&data, &r)?;
+    let bus = f.bus.as_ref().unwrap();
+    assert!(bus.lines.len() >= 4);
+    assert!(
+        bus.lines
+            .iter()
+            .all(|l| l.source.rate <= f.belt_items_per_second * 0.85 + 1e-8)
+    );
+    for pair in bus.lines.chunks_exact(2) {
+        let rows = |targets: &Vec<u32>| {
+            f.rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.input_ports().any(|p| targets.contains(&p.entity_number)))
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows(&pair[0].targets), rows(&pair[1].targets));
+    }
+    let mut bad = f;
+    let underground = bad
+        .document
+        .blueprint
+        .entities
+        .iter_mut()
+        .find(|e| e.belt_type.as_deref() == Some("output"))
+        .unwrap();
+    underground.belt_type = Some("input".into());
+    assert!(validate_factory(&data, &bad).is_err());
+    Ok(())
+}
+
+#[test]
+fn old_requests_default_to_direct_ports_without_optional_infrastructure() -> Result<()> {
+    let mut json = serde_json::to_value(FactoryRequest::new("iron-gear-wheel", 1.0))?;
+    for key in [
+        "common_input",
+        "output_chest",
+        "input_markers",
+        "max_machines_per_row",
+        "max_row_width",
+    ] {
+        json.as_object_mut().unwrap().remove(key);
+    }
+    let request: FactoryRequest = serde_json::from_value(json)?;
+    let f = generate_blueprint(&common::catalog(), &request)?;
+    assert!(f.bus.is_none() && f.storage.is_empty() && f.markers.is_empty());
+    Ok(())
+}
 use flate2::read::ZlibDecoder;
 use serde_json::json;
 

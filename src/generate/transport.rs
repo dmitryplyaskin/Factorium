@@ -64,13 +64,17 @@ pub(super) fn validate(
             && e.position.y + b.right_bottom.y > f64::from(tile.1)
             && e.position.y + b.left_top.y < f64::from(tile.1 + 1))
     };
-    let walk = |start: u32| -> Result<Vec<u32>> {
+    let walk = |start: u32, stop: Option<u32>| -> Result<Vec<u32>> {
         let mut path = Vec::new();
         let mut current = start;
         loop {
             let e = *ids.get(&current).context("Unknown belt port")?;
             ensure!(e.name == f.request.belt, "Port is not a belt");
+            ensure!(e.direction == 4, "Production belt must face east");
             path.push(current);
+            if stop == Some(current) {
+                break;
+            }
             let next = (e.position.x.floor() as i32 + 1, e.position.y.floor() as i32);
             match occupied.get(&next).and_then(|id| ids.get(id)) {
                 Some(e) if e.name == f.request.belt => current = e.entity_number,
@@ -79,15 +83,27 @@ pub(super) fn validate(
         }
         Ok(path)
     };
-    let mut used_belts = BTreeSet::new();
+    let extra = super::infrastructure_check::validate(data, f, ids, occupied)?;
+    let mut used_belts = extra.belts;
     let mut used_machines = BTreeSet::new();
-    let mut used_arms = BTreeSet::new();
+    let mut used_arms = extra.arms;
     let mut output_paths: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     let mut output_lanes = BTreeSet::new();
     let mut output_rate = 0.0;
     let mut input_rates = vec![0.0; requirements.len()];
     for row in &f.rows {
         let ports: Vec<_> = row.input_ports().collect();
+        ensure!(
+            f.request
+                .max_machines_per_row
+                .is_none_or(|n| row.machines.len() <= n),
+            "Row exceeds machine-count limit"
+        );
+        let width = (row.output.position.x - row.input.position.x + 1.0).round() as u32;
+        ensure!(
+            f.request.max_row_width.is_none_or(|n| width <= n),
+            "Row exceeds width limit in tiles"
+        );
         ensure!(
             ports.len() == requirements.len(),
             "Every row needs a separate port for every ingredient"
@@ -128,7 +144,7 @@ pub(super) fn validate(
                     .is_some_and(|e| e.position == port.position),
                 "Input port coordinates mismatch"
             );
-            let path = walk(port.entity_number)?;
+            let path = walk(port.entity_number, None)?;
             for &id in &path {
                 ensure!(
                     used_belts.insert(id),
@@ -141,10 +157,12 @@ pub(super) fn validate(
         let last = ids[&row.output.entity_number];
         let first = ids
             .values()
-            .filter(|e| e.name == f.request.belt && e.position.y == last.position.y)
+            .filter(|e| {
+                e.name == f.request.belt && e.direction == 4 && e.position.y == last.position.y
+            })
             .min_by(|a, b| a.position.x.total_cmp(&b.position.x))
             .context("Missing output line")?;
-        let output_line = walk(first.entity_number)?;
+        let output_line = walk(first.entity_number, Some(row.output.entity_number))?;
         ensure!(
             output_line.last() == Some(&row.output.entity_number),
             "Output port is not the end of its belt"
@@ -177,6 +195,9 @@ pub(super) fn validate(
         let mut inputs: Vec<HashMap<u32, usize>> = vec![HashMap::new(); requirements.len()];
         let mut outputs: HashMap<u32, usize> = HashMap::new();
         for &id in arms {
+            if used_arms.contains(&id) {
+                continue;
+            }
             let arm = ids[&id];
             let reach = if arm.name == f.request.inserter { 1 } else { 2 };
             let dy = if arm.direction == 0 { reach } else { -reach };

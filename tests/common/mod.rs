@@ -95,6 +95,31 @@ pub fn catalog_value() -> Value {
         let mut e = prototype(name, "transport-belt", 1, 1);
         e["belt_speed"] = json!(speed);
         data["entities"][name] = e;
+        let prefix = if name.starts_with("fast-") {
+            "fast-"
+        } else {
+            ""
+        };
+        for (kind, w) in [("splitter", 2), ("underground-belt", 1)] {
+            let name = format!("{prefix}{kind}");
+            let mut e = prototype(&name, kind, w, 1);
+            e["belt_speed"] = json!(speed);
+            e["max_underground_distance"] = json!(5);
+            data["entities"][name] = e;
+        }
+    }
+    for name in [
+        "steel-chest",
+        "iron-chest",
+        "wooden-chest",
+        "constant-combinator",
+    ] {
+        let kind = if name == "constant-combinator" {
+            name
+        } else {
+            "container"
+        };
+        data["entities"][name] = prototype(name, kind, 1, 1);
     }
     for (name, rot, ext, reach) in [
         ("fast-inserter", 0.04, 0.1, 1),

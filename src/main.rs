@@ -51,6 +51,20 @@ enum Commands {
         /// Two-tile-reach inserter for a second ingredient (auto-selected by default).
         #[arg(long)]
         secondary_inserter: Option<String>,
+        /// Route one or more shared inlet belts to the production rows.
+        #[arg(long)]
+        common_input: bool,
+        /// Collect output in ordinary chests (default: steel-chest).
+        #[arg(long,num_args=0..=1,default_missing_value="steel-chest")]
+        output_chest: Option<String>,
+        /// Label inlets using constant combinators with item signals.
+        #[arg(long)]
+        input_markers: bool,
+        #[arg(long)]
+        max_machines_per_row: Option<usize>,
+        /// Production belt length in tiles, excluding external bus and storage.
+        #[arg(long)]
+        max_row_width: Option<u32>,
         #[arg(long, default_value = "small-electric-pole")]
         pole: String,
         #[arg(long, default_value = "data/game/catalog.json")]
@@ -221,6 +235,11 @@ fn main() -> Result<()> {
             belt,
             inserter,
             secondary_inserter,
+            common_input,
+            output_chest,
+            input_markers,
+            max_machines_per_row,
+            max_row_width,
             pole,
             catalog,
             output,
@@ -237,6 +256,11 @@ fn main() -> Result<()> {
                 belt,
                 inserter,
                 secondary_inserter,
+                common_input,
+                output_chest,
+                input_markers,
+                max_machines_per_row,
+                max_row_width,
                 pole,
             };
             let factory = generate_blueprint(&data, &request)?;
@@ -250,7 +274,7 @@ fn main() -> Result<()> {
             );
             println!(
                 "Ports: {} input belts, {} output belts ({} using both lanes)",
-                factory.input_ports().count(),
+                factory.external_inputs().len(),
                 factory.output_ports().len(),
                 factory
                     .output_ports()

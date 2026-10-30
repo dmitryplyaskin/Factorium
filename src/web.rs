@@ -198,8 +198,13 @@ fn build_catalog(data: &GameData, game_available: bool) -> Value {
         .filter(|e| inserter_reach(e, 2))
         .map(option)
         .collect();
+    let chests: Vec<_> = equipment("container")
+        .into_iter()
+        .filter(|e| e.tile_width == 1 && e.tile_height == 1)
+        .map(option)
+        .collect();
     json!({"game_version":data.game_version,"mods":data.mods,"recipe_count":data.recipes.len(),"recipes":recipes,
-        "machines":machines.into_iter().map(option).collect::<Vec<_>>(),"belts":belts,"inserters":inserters,"long_inserters":long_inserters,"poles":poles,
+        "machines":machines.into_iter().map(option).collect::<Vec<_>>(),"belts":belts,"inserters":inserters,"long_inserters":long_inserters,"poles":poles,"chests":chests,
         "verification_available":game_available,"verification_hint":if game_available {"Factorio готова к проверке"} else {"Factorio не найдена. Запустите сервер с параметром --factorio."}})
 }
 

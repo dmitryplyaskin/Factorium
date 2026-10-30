@@ -94,6 +94,7 @@ impl Production<'_> {
                 item: item.clone(),
                 rate: rate * amount / self.output_amount,
                 lanes: "both".into(),
+                direction: 4,
             })
             .collect();
         let input = ports.remove(0);
@@ -107,6 +108,7 @@ impl Production<'_> {
                 item: self.request.product.clone(),
                 rate,
                 lanes: lane.into(),
+                direction: 4,
             },
         }
     }

@@ -1,5 +1,7 @@
 //! Single-recipe solid production lines. Layout and power use game prototypes.
 
+mod infrastructure;
+mod infrastructure_check;
 mod layout;
 mod power;
 mod rows;
@@ -24,6 +26,13 @@ use crate::{
 
 pub use validate::validate_factory;
 
+pub(crate) fn inserter_observations(
+    data: &GameData,
+    f: &GeneratedFactory,
+) -> Result<Vec<serde_json::Value>> {
+    infrastructure::observed_inserters(data, f)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryRequest {
     pub product: String,
@@ -35,6 +44,16 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub secondary_inserter: Option<String>,
     pub pole: String,
+    #[serde(default)]
+    pub common_input: bool,
+    #[serde(default)]
+    pub output_chest: Option<String>,
+    #[serde(default)]
+    pub input_markers: bool,
+    #[serde(default)]
+    pub max_machines_per_row: Option<usize>,
+    #[serde(default)]
+    pub max_row_width: Option<u32>,
 }
 
 impl FactoryRequest {
@@ -48,6 +67,11 @@ impl FactoryRequest {
             inserter: "fast-inserter".into(),
             secondary_inserter: None,
             pole: "small-electric-pole".into(),
+            common_input: false,
+            output_chest: None,
+            input_markers: false,
+            max_machines_per_row: None,
+            max_row_width: None,
         }
     }
 }
@@ -59,6 +83,42 @@ pub struct BeltPort {
     pub item: String,
     pub rate: f64,
     pub lanes: String,
+    #[serde(default = "east")]
+    pub direction: u8,
+}
+
+fn east() -> u8 {
+    4
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusLine {
+    pub source: BeltPort,
+    pub targets: Vec<u32>,
+    pub entities: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputBus {
+    pub splitter: String,
+    pub underground: String,
+    pub lines: Vec<BusLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputStorage {
+    pub output_entity: u32,
+    pub belts: Vec<u32>,
+    pub inserters: Vec<u32>,
+    pub chests: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputMarker {
+    pub entity_number: u32,
+    pub target_entity: u32,
+    pub item: String,
+    pub rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +181,12 @@ pub struct GeneratedFactory {
     pub rows: Vec<ProductionRow>,
     pub entity_sizes: BTreeMap<String, [u32; 2]>,
     pub document: BlueprintDocument,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<InputBus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub storage: Vec<OutputStorage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<InputMarker>,
 }
 
 impl GeneratedFactory {
@@ -140,6 +206,13 @@ impl GeneratedFactory {
 
     pub fn input_ports(&self) -> impl Iterator<Item = &BeltPort> {
         self.rows.iter().flat_map(ProductionRow::input_ports)
+    }
+
+    pub fn external_inputs(&self) -> Vec<BeltPort> {
+        self.bus
+            .as_ref()
+            .map(|bus| bus.lines.iter().map(|l| l.source.clone()).collect())
+            .unwrap_or_else(|| self.input_ports().cloned().collect())
     }
 
     /// Physical output ports, with row contributions combined on shared belts.
@@ -226,17 +299,48 @@ impl GeneratedFactory {
         }
         for e in entities {
             let size = self.entity_sizes[&e.name];
+            let size = if matches!(e.direction, 4 | 12) {
+                [size[1], size[0]]
+            } else {
+                size
+            };
             let (w, h) = (f64::from(size[0]) - 0.1, f64::from(size[1]) - 0.1);
             let color = if e.name == self.request.machine {
                 "#4eaa96"
             } else if e.name == self.request.belt {
                 "#d1af53"
-            } else if e.name == self.request.inserter {
+            } else if e.name == self.request.inserter
+                || self
+                    .input_requirements()
+                    .iter()
+                    .any(|r| r.inserter == e.name)
+            {
                 "#6aaff0"
+            } else if e.name == "constant-combinator" {
+                "#a5bce1"
+            } else if Some(e.name.as_str()) == self.request.output_chest.as_deref() {
+                "#ba8967"
+            } else if self
+                .bus
+                .as_ref()
+                .is_some_and(|b| e.name == b.splitter || e.name == b.underground)
+            {
+                "#c38d43"
             } else {
                 "#e9dbb9"
             };
             svg.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"{w}\" height=\"{h}\" fill=\"{color}\" stroke=\"#18202a\" stroke-width=\"0.08\"/>",e.position.x-w/2.0,e.position.y-h/2.0));
+            if e.name == self.request.belt {
+                svg.push_str(&format!("<path d=\"M -0.25 0 L 0.25 0 L 0.05 -0.2 M 0.25 0 L 0.05 0.2\" transform=\"translate({} {}) rotate({})\" stroke=\"#f2df99\" fill=\"none\" stroke-width=\"0.06\"/>",e.position.x,e.position.y,i32::from(e.direction)*45/2-90));
+            }
+        }
+        for (i, port) in self.external_inputs().iter().enumerate() {
+            let item = port
+                .item
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            svg.push_str(&format!("<text x=\"{}\" y=\"{}\" fill=\"#85d9ba\" font-size=\"0.5\" text-anchor=\"end\">IN {}: {} {:.3}/s</text>",port.position.x-1.0,port.position.y-0.8,i+1,item,port.rate));
         }
         svg.push_str("</svg>");
         svg
@@ -682,6 +786,19 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
         "Request exceeds prototype budget (1024 machines); reduce the rate or choose faster equipment"
     );
     let count = count as usize;
+    ensure!(
+        request
+            .max_machines_per_row
+            .is_none_or(|n| (1..=64).contains(&n)),
+        "Row machine limit must be 1..64"
+    );
+    ensure!(
+        request
+            .max_row_width
+            .is_none_or(|n| n >= machine.tile_width + 4 && n <= 10000),
+        "Row width must be at least {} tiles (machine plus belt ends), and at most 10000",
+        machine.tile_width + 4
+    );
     // Row limits follow the supplied flow per machine. The final machine need
     // not run at full modelled speed: rounding its count up must not force an
     // unnecessary extra output belt when two lanes can carry the whole target.
@@ -692,10 +809,12 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
             max_per_row,
             legacy_per_row,
             input_belts: flow.ingredients.len() as u32,
+            machine_limit: request.max_machines_per_row,
+            width_limit: request.max_row_width,
             machine: [machine.tile_width, machine.tile_height],
             pole: [pole.tile_width, pole.tile_height],
         },
-        |spec| {
+        |spec, best_area| {
             let mut doc = BlueprintDocument::new(
                 &data.game_version,
                 format!("Factorium: {} >= {}/s", request.product, request.rate),
@@ -712,10 +831,48 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                 planned,
             }
             .place(&mut doc, spec);
+            let (bus, storage, markers) = infrastructure::place(
+                data,
+                request,
+                &rows,
+                &mut doc,
+                infrastructure::Rates {
+                    belt: belt_rate,
+                    arm: arm_rate,
+                    machine_output: crafts * b,
+                },
+            )?;
             ensure!(
                 doc.blueprint.entities.len() <= 50000,
                 "Layout exceeds prototype entity budget"
             );
+            if let Some(best_area) = best_area {
+                // Infrastructure changes the footprint substantially. Reject
+                // candidates that already exceed the incumbent before the
+                // more expensive power-network search. Poles can only expand it.
+                let (mut x0, mut y0, mut x1, mut y1) = (
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                );
+                for e in &doc.blueprint.entities {
+                    let p = entity(data, &e.name)?;
+                    let (w, h) = if matches!(e.direction, 4 | 12) {
+                        (p.tile_height, p.tile_width)
+                    } else {
+                        (p.tile_width, p.tile_height)
+                    };
+                    x0 = x0.min(e.position.x - f64::from(w) / 2.0);
+                    x1 = x1.max(e.position.x + f64::from(w) / 2.0);
+                    y0 = y0.min(e.position.y - f64::from(h) / 2.0);
+                    y1 = y1.max(e.position.y + f64::from(h) / 2.0);
+                }
+                ensure!(
+                    ((x1 - x0) * (y1 - y0)).round() as u64 <= best_area,
+                    "Layout already exceeds the best candidate footprint"
+                );
+            }
             let mut power = power::place_and_wire(data, &mut doc, &request.pole)?;
             let demand = |e: &Entity| -> Result<f64> {
                 Ok((stat(e, "max_energy_usage")?
@@ -727,15 +884,22 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                         .unwrap_or(0.0))
                     * 60.0)
             };
-            let input_main_arms = if secondary.is_some() {
-                1
-            } else {
-                arm_columns.len()
-            };
-            power.installed_power_watts = count as f64
-                * (demand(machine)?
-                    + (input_main_arms + arm_columns.len()) as f64 * demand(arm)?
-                    + secondary.map(demand).transpose()?.unwrap_or(0.0));
+            power.installed_power_watts =
+                doc.blueprint.entities.iter().try_fold(0.0, |total, e| {
+                    let proto = entity(data, &e.name)?;
+                    Ok::<_, anyhow::Error>(
+                        total
+                            + if proto
+                                .prototype
+                                .properties
+                                .contains_key("electric_energy_source")
+                            {
+                                demand(proto)?
+                            } else {
+                                0.0
+                            },
+                    )
+                })?;
             let input_summary = flow
                 .ingredients
                 .iter()
@@ -757,17 +921,31 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                 power.connection_position.x,
                 power.connection_position.y,
                 power.installed_power_watts,
-                rows.iter().map(|r| r.input_ports().count()).sum::<usize>(),
+                bus.as_ref()
+                    .map(|b| b.lines.len())
+                    .unwrap_or_else(|| rows.iter().map(|r| r.input_ports().count()).sum::<usize>()),
                 rows.iter()
                     .map(|r| r.output.entity_number)
                     .collect::<std::collections::BTreeSet<_>>()
                     .len()
             );
-            let entity_sizes = [Some(machine), Some(belt), Some(arm), Some(pole), secondary]
-                .into_iter()
-                .flatten()
-                .map(|e| (e.prototype.name.clone(), [e.tile_width, e.tile_height]))
-                .collect();
+            if bus.is_some() {
+                doc.blueprint.description.push_str(" Shared bus: connect separate ingredient belts from the north; splitters redistribute flow between rows.");
+            }
+            if !storage.is_empty() {
+                doc.blueprint.description.push_str(
+                    " Output goes into finite chest storage; production stops when full.",
+                );
+            }
+            let entity_sizes = doc
+                .blueprint
+                .entities
+                .iter()
+                .map(|e| {
+                    let p = entity(data, &e.name)?;
+                    Ok((e.name.clone(), [p.tile_width, p.tile_height]))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
             let factory = GeneratedFactory {
                 schema_version: 1,
                 game_version: data.game_version.clone(),
@@ -802,6 +980,9 @@ pub fn generate_blueprint(data: &GameData, request: &FactoryRequest) -> Result<G
                 rows,
                 entity_sizes,
                 document: doc,
+                bus,
+                storage,
+                markers,
             };
             validate_factory(data, &factory)?;
             Ok(factory)

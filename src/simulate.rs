@@ -49,6 +49,13 @@ pub struct InputMeasurement {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct StorageMeasurement {
+    pub chest_entity: u32,
+    pub stored_items: u64,
+    pub added_items: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SimulationReport {
     pub passed: bool,
     pub game_version: String,
@@ -66,6 +73,16 @@ pub struct SimulationReport {
     pub inserted_items: u64,
     #[serde(default, deserialize_with = "crate::model::lua_vec")]
     pub input_deliveries: Vec<InputMeasurement>,
+    #[serde(default, deserialize_with = "crate::model::lua_vec")]
+    pub external_input_deliveries: Vec<InputMeasurement>,
+    #[serde(default, deserialize_with = "crate::model::lua_vec")]
+    pub storage_deliveries: Vec<StorageMeasurement>,
+    #[serde(default)]
+    pub input_measurement_location: String,
+    #[serde(default)]
+    pub output_measurement_location: String,
+    #[serde(default)]
+    pub row_measurement_location: String,
     #[serde(default, deserialize_with = "crate::model::lua_vec")]
     pub row_outputs: Vec<RowMeasurement>,
     pub warmup_ticks: u32,
@@ -93,7 +110,12 @@ pub fn verify_in_game(
         .and_then(|n| n.checked_add(2))
         .filter(|&n| n <= 3_600_000)
         .ok_or_else(|| anyhow::anyhow!("Simulation duration exceeds the prototype limit"))?;
-    let payload=serde_json::json!({"factory":factory,"inputs":factory.input_requirements(),"blueprint_string":factory.document.encode()?,"options":options}).to_string();
+    let observations = if factory.bus.is_some() || !factory.storage.is_empty() {
+        crate::generate::inserter_observations(data, factory)?
+    } else {
+        Vec::new()
+    };
+    let payload=serde_json::json!({"factory":factory,"inputs":factory.input_requirements(),"external_inputs":factory.external_inputs(),"observed_inserters":observations,"blueprint_string":factory.document.encode()?,"options":options}).to_string();
     let mut equals = String::from("=");
     while payload.contains(&format!("]{equals}]")) {
         equals.push('=');

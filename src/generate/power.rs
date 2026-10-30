@@ -324,16 +324,66 @@ pub(crate) fn place_and_wire(
         let pos = pole_position(tile, p);
         ids.insert(i, doc.add(name, pos.x, pos.y, 0));
     }
+    let mut degrees = vec![0; selected.len()];
     for (i, j) in final_edges {
         doc.blueprint.wires.push([ids[&i], 5, ids[&j], 5]);
+        degrees[i] += 1;
+        degrees[j] += 1;
     }
+    // The first coverage pole can be deep inside an expanded bus/storage
+    // footprint. Expose a pole near an outer edge with a spare copper socket.
+    let x0 = occupied
+        .iter()
+        .map(|t| t.0)
+        .chain(selected.iter().map(|t| t.0))
+        .min()
+        .unwrap();
+    let y0 = occupied
+        .iter()
+        .map(|t| t.1)
+        .chain(selected.iter().map(|t| t.1))
+        .min()
+        .unwrap();
+    let x1 = occupied
+        .iter()
+        .map(|t| t.0 + 1)
+        .chain(selected.iter().map(|t| t.0 + p.tile_width as i32))
+        .max()
+        .unwrap();
+    let y1 = occupied
+        .iter()
+        .map(|t| t.1 + 1)
+        .chain(selected.iter().map(|t| t.1 + p.tile_height as i32))
+        .max()
+        .unwrap();
+    let exit_distance = |i: usize| {
+        let pos = pole_position(selected[i], p);
+        [
+            (pos.x - f64::from(x0)).min(f64::from(x1) - pos.x)
+                + f64::from(p.tile_width) / 2.0
+                + 1.0,
+            (pos.y - f64::from(y0)).min(f64::from(y1) - pos.y)
+                + f64::from(p.tile_height) / 2.0
+                + 1.0,
+        ]
+        .into_iter()
+        .fold(f64::INFINITY, f64::min)
+    };
+    let connection = (0..selected.len())
+        .filter(|&i| degrees[i] < 5)
+        .min_by(|&a, &b| exit_distance(a).total_cmp(&exit_distance(b)))
+        .context("No spare copper connection for external power")?;
+    ensure!(
+        exit_distance(connection) <= reach + 1e-8,
+        "No pole can accept external power outside the blueprint footprint"
+    );
     Ok(PowerPlan {
         pole: name.into(),
         supply_area_distance: radius,
         max_wire_distance: reach,
         pole_count: selected.len(),
-        connection_entity: ids[&0],
-        connection_position: pole_position(selected[0], p),
+        connection_entity: ids[&connection],
+        connection_position: pole_position(selected[connection], p),
         installed_power_watts: 0.0,
     })
 }

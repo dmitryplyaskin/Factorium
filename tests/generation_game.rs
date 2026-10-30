@@ -134,3 +134,104 @@ fn measures_blueprint_import_throughput_and_power_in_the_real_game() -> Result<(
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "requires installed Factorio; cargo test --test generation_game optional_infrastructure -- --ignored --nocapture"]
+fn optional_infrastructure_transports_items_and_stores_real_output() -> Result<()> {
+    let binary = discover_factorio()?;
+    let mut game = ExtractOptions::new(&binary);
+    game.mod_directory = discover_mod_directory(&binary);
+    let export = tempfile::tempdir()?;
+    let data = extract_game_data(&game, export.path())?;
+    let mut cases = Vec::new();
+    let mut r = FactoryRequest::new("iron-gear-wheel", 12.0);
+    r.output_chest = Some("steel-chest".into());
+    cases.push(r);
+    let mut r = FactoryRequest::new("iron-gear-wheel", 5.0);
+    r.common_input = true;
+    r.input_markers = true;
+    r.max_machines_per_row = Some(3);
+    cases.push(r);
+    for rate in [1.0, 5.0] {
+        let mut r = FactoryRequest::new("electronic-circuit", rate);
+        r.pole = "substation".into();
+        r.common_input = true;
+        r.input_markers = true;
+        r.output_chest = Some("steel-chest".into());
+        r.max_machines_per_row = Some(4);
+        r.max_row_width = Some(20);
+        cases.push(r);
+    }
+    let mut r = FactoryRequest::new("iron-plate", 1.0);
+    r.machine = "electric-furnace".into();
+    r.output_chest = Some("iron-chest".into());
+    r.inserter = "inserter".into();
+    r.belt = "fast-transport-belt".into();
+    r.common_input = true;
+    r.input_markers = true;
+    r.max_row_width = Some(10);
+    cases.push(r);
+    for r in cases {
+        eprintln!(
+            "Options case: {} {}/s, bus={}, storage={:?}",
+            r.product, r.rate, r.common_input, r.output_chest
+        );
+        let factory = generate_blueprint(&data, &r)?;
+        let report = verify_in_game(&data, &factory, &game, &SimulationOptions::default())?;
+        eprintln!(
+            "{} rows, {} external inputs, measured {:.3}/s",
+            factory.rows.len(),
+            factory.external_inputs().len(),
+            report.measured_output_per_second
+        );
+        assert!(report.passed, "{report:#?}");
+        assert!(report.unpowered_entities.is_empty());
+        assert_eq!(report.network_count, 1);
+        assert!(report.row_outputs.iter().all(|row| row.delivered_items > 0));
+        if r.common_input {
+            assert_eq!(
+                report.external_input_deliveries.len(),
+                factory.external_inputs().len()
+            );
+        }
+        if r.output_chest.is_some() {
+            assert_eq!(report.output_measurement_location, "chests");
+            assert_eq!(
+                report
+                    .storage_deliveries
+                    .iter()
+                    .map(|c| c.added_items)
+                    .sum::<u64>(),
+                report.delivered_items
+            );
+            assert!(
+                report
+                    .storage_deliveries
+                    .iter()
+                    .all(|c| c.stored_items >= c.added_items)
+            );
+        }
+    }
+    // Storage is finite: the harness must neither clear chests nor count
+    // items waiting on a blocked belt as delivered output.
+    let mut r = FactoryRequest::new("iron-gear-wheel", 0.5);
+    r.output_chest = Some("wooden-chest".into());
+    let factory = generate_blueprint(&data, &r)?;
+    let full = verify_in_game(
+        &data,
+        &factory,
+        &game,
+        &SimulationOptions {
+            warmup_ticks: 4000 * 60,
+            measurement_ticks: 120 * 60,
+        },
+    )?;
+    assert!(!full.passed);
+    assert_eq!(full.delivered_items, 0);
+    assert!(
+        full.storage_deliveries
+            .iter()
+            .all(|c| c.stored_items > 0 && c.added_items == 0)
+    );
+    Ok(())
+}

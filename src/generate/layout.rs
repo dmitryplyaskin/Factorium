@@ -20,18 +20,29 @@ pub(super) struct Dimensions {
     pub max_per_row: usize,
     pub legacy_per_row: usize,
     pub input_belts: u32,
+    pub machine_limit: Option<usize>,
+    pub width_limit: Option<u32>,
     pub machine: [u32; 2],
     pub pole: [u32; 2],
 }
 
 impl Dimensions {
     fn legacy(&self) -> LayoutSpec {
-        LayoutSpec {
+        self.bound(LayoutSpec {
             paired: false,
             per_row: self.legacy_per_row,
             machine_gap: self.pole[0] + 2,
             row_gap: self.pole[1] + 4,
+        })
+    }
+
+    fn bound(&self, mut spec: LayoutSpec) -> LayoutSpec {
+        spec.per_row = spec.per_row.min(self.machine_limit.unwrap_or(64));
+        if let Some(width) = self.width_limit {
+            let n = (width - 4 + spec.machine_gap) / (self.machine[0] + spec.machine_gap);
+            spec.per_row = spec.per_row.min(n as usize);
         }
+        spec
     }
 
     fn production_area(&self, spec: LayoutSpec) -> u64 {
@@ -76,7 +87,7 @@ impl Dimensions {
                 };
                 for &machine_gap in &gaps {
                     for &row_gap in &row_gaps {
-                        specs.push(LayoutSpec {
+                        specs.push(self.bound(LayoutSpec {
                             paired,
                             per_row,
                             machine_gap: if self.count == 1 { 0 } else { machine_gap },
@@ -85,7 +96,7 @@ impl Dimensions {
                             } else {
                                 row_gap
                             },
-                        });
+                        }));
                     }
                 }
             }
@@ -147,12 +158,12 @@ impl Score {
 
 pub(super) fn optimize(
     dimensions: Dimensions,
-    mut build_and_validate: impl FnMut(LayoutSpec) -> Result<GeneratedFactory>,
+    mut build_and_validate: impl FnMut(LayoutSpec, Option<u64>) -> Result<GeneratedFactory>,
 ) -> Result<GeneratedFactory> {
     let legacy = dimensions.legacy();
     // Preserve the former template as a fallback and a quality upper bound.
     // Failure of that template must not exclude a feasible compact candidate.
-    let (mut best, mut failure) = match build_and_validate(legacy) {
+    let (mut best, mut failure) = match build_and_validate(legacy, None) {
         Ok(factory) => (Some((Score::of(&factory), factory)), None),
         Err(error) => (None, Some(error)),
     };
@@ -164,7 +175,7 @@ pub(super) fn optimize(
         {
             continue;
         }
-        match build_and_validate(spec) {
+        match build_and_validate(spec, best.as_ref().map(|(s, _)| s.area)) {
             Ok(factory) => {
                 let score = Score::of(&factory);
                 if best.as_ref().is_none_or(|(old, _)| score < *old) {
