@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use anyhow::{Context, Result, ensure};
 
 use super::{
-    BeltPort, BusLine, FactoryRequest, InputBus, ProductionRow, entity, infrastructure::matching,
-    power::tiles,
+    BeltPort, BusLine, FactoryRequest, GenerationControl, InputBus, ProductionRow, entity,
+    infrastructure::matching, power::tiles,
 };
 use crate::{GameData, blueprint::BlueprintDocument};
 
@@ -174,6 +174,57 @@ pub(super) fn place(
     rows: &[ProductionRow],
     doc: &mut BlueprintDocument,
     belt_rate: f64,
+    control: &GenerationControl,
+    refine: bool,
+) -> Result<InputBus> {
+    let production_len = doc.blueprint.entities.len();
+    let mut best = None;
+    let mut failure = None;
+    let mut direct = doc.clone();
+    match super::spine_bus::place(data, request, rows, &mut direct, belt_rate, control, refine) {
+        Ok(bus) => {
+            let score =
+                super::route_cost::measure(data, &direct.blueprint.entities[production_len..])?;
+            best = Some((score, direct, bus));
+        }
+        Err(error) => failure = Some(error),
+    }
+    control.check()?;
+    // For many independent capacity groups, the former fan-out can degenerate
+    // into cheap straight feeds. Compare its actual cost instead of forcing a
+    // wider trunk plan or accepting a smaller bounding box unconditionally.
+    let mut fallback = doc.clone();
+    match place_tree(data, request, rows, &mut fallback, belt_rate) {
+        Ok(bus) => {
+            if super::infrastructure_check::validate_bus(
+                data, request, rows, &fallback, &bus, belt_rate,
+            )
+            .is_ok()
+            {
+                let score = super::route_cost::measure(
+                    data,
+                    &fallback.blueprint.entities[production_len..],
+                )?;
+                if best.as_ref().is_none_or(|(old, _, _)| score < *old) {
+                    best = Some((score, fallback, bus));
+                }
+            }
+        }
+        Err(error) => failure = Some(error),
+    }
+    control.check()?;
+    let (_, selected, bus) =
+        best.ok_or_else(|| failure.unwrap_or_else(|| anyhow::anyhow!("No valid input route")))?;
+    *doc = selected;
+    Ok(bus)
+}
+
+fn place_tree(
+    data: &GameData,
+    request: &FactoryRequest,
+    rows: &[ProductionRow],
+    doc: &mut BlueprintDocument,
+    belt_rate: f64,
 ) -> Result<InputBus> {
     let belt = entity(data, &request.belt)?;
     let splitter = matching(data, belt, "splitter", [2, 1])?;
@@ -211,23 +262,11 @@ pub(super) fn place(
     } else {
         1
     };
-    let right = if request.reverse_output {
-        // Lane balancers and collectors stay beside the rows, inside the bus.
-        let groups = super::output_bus::groups(rows, belt_rate);
-        let balance = groups
-            .iter()
-            .any(|g| super::output_bus::needs_balance(rows, g, belt_rate));
-        if groups.len() == 1 && groups[0].len() == 1 {
-            -5
-        } else {
-            -7 - if balance { 8 } else { 0 } - 4 * groups.len() as i32
-        }
-    } else {
-        -5
-    };
-    let block = 3 * depth + (partitions.len() as i32 - 1) * pitch + 4;
+    let right = right_boundary(request, rows, belt_rate);
+    let block = 3 * depth + (partitions.len() as i32 - 1) * pitch + 2;
     let mut groups = Vec::new();
     for (i, partition) in partitions.iter().enumerate() {
+        let mut physical = 0;
         for j in 0..ingredients {
             let first = partition[0].input_ports().nth(j).unwrap();
             if partition[0]
@@ -243,12 +282,13 @@ pub(super) fn place(
                 .collect();
             ports.sort_by(|a, b| a.position.y.total_cmp(&b.position.y));
             groups.push((
-                right - 3 * depth - j as i32 * block - i as i32 * pitch,
+                right - 3 * depth - physical * block - i as i32 * pitch,
                 ports,
             ));
+            physical += 1;
         }
     }
-    let west = groups.iter().map(|g| g.0).min().unwrap() - 3;
+    let west = groups.iter().map(|g| g.0).min().unwrap() - 2;
     let top = rows
         .iter()
         .flat_map(ProductionRow::input_ports)
@@ -283,6 +323,7 @@ pub(super) fn place(
         let begin = route.doc.blueprint.entities.len();
         let source = begin as u32 + 1;
         let first_y = ports[0].position.y.floor() as i32;
+        let mut leaves = Vec::new();
         if y == first_y {
             route.run((west, y), (x - 1, y), 4, 4)?;
         } else {
@@ -298,7 +339,6 @@ pub(super) fn place(
                 }
             }
         }
-        let mut leaves = Vec::new();
         route.branch(*x, ports, &splitter.prototype.name, &mut leaves)?;
         outlets.push(leaves);
         lines.push(BusLine {
@@ -355,4 +395,25 @@ pub(super) fn place(
         lines,
         output_entities: Vec::new(),
     })
+}
+
+pub(super) fn right_boundary(
+    request: &FactoryRequest,
+    rows: &[ProductionRow],
+    belt_rate: f64,
+) -> i32 {
+    if request.reverse_output {
+        // Lane balancers and collectors stay beside the rows, inside the bus.
+        let groups = super::output_bus::groups(rows, belt_rate);
+        let balance = groups
+            .iter()
+            .any(|g| super::output_bus::needs_balance(rows, g, belt_rate));
+        if groups.len() == 1 && groups[0].len() == 1 {
+            -6
+        } else {
+            -4 - if balance { 4 } else { 0 } - 4 * groups.len() as i32
+        }
+    } else {
+        -5
+    }
 }

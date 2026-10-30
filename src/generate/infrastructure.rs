@@ -1,8 +1,8 @@
 //! Optional boundary bus, output storage and in-game input signs.
 
 use super::{
-    BeltPort, BusLine, FactoryRequest, GeneratedFactory, InputBus, InputMarker, OutputStorage,
-    ProductionRow, entity, power::tiles,
+    BeltPort, BusLine, FactoryRequest, GeneratedFactory, GenerationControl, InputBus, InputMarker,
+    OutputStorage, ProductionRow, entity, power::tiles,
 };
 use crate::{GameData, blueprint::BlueprintDocument, model::Entity};
 use anyhow::{Context, Result, ensure};
@@ -58,9 +58,13 @@ pub(super) fn place(
     rows: &mut [ProductionRow],
     doc: &mut BlueprintDocument,
     rates: Rates,
+    control: &GenerationControl,
+    refine: bool,
 ) -> Result<(Option<InputBus>, Vec<OutputStorage>, Vec<InputMarker>)> {
     let mut bus = if request.common_input {
-        Some(place_bus(data, request, rows, doc, rates.belt)?)
+        Some(place_bus(
+            data, request, rows, doc, rates.belt, control, refine,
+        )?)
     } else {
         None
     };
@@ -95,11 +99,21 @@ fn place_bus(
     rows: &[ProductionRow],
     doc: &mut BlueprintDocument,
     belt_rate: f64,
+    control: &GenerationControl,
+    refine: bool,
 ) -> Result<InputBus> {
     // Retain the previous router for catalogs whose underground equipment
     // cannot cross the compact corridors without collisions.
     let mut compact = doc.clone();
-    if let Ok(bus) = super::compact_bus::place(data, request, rows, &mut compact, belt_rate) {
+    if let Ok(bus) = super::compact_bus::place(
+        data,
+        request,
+        rows,
+        &mut compact,
+        belt_rate,
+        control,
+        refine,
+    ) {
         *doc = compact;
         return Ok(bus);
     }

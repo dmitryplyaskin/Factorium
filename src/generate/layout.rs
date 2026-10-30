@@ -5,6 +5,47 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 
 use super::{GeneratedFactory, GenerationControl};
+use crate::{GameData, blueprint::BlueprintDocument};
+
+pub(super) fn quality(
+    data: &GameData,
+    request: &super::FactoryRequest,
+    doc: &BlueprintDocument,
+    area: u64,
+) -> Result<u64> {
+    Ok(area
+        + if request.common_input {
+            16 * super::route_cost::measure(data, &doc.blueprint.entities)?.cost
+        } else {
+            0
+        })
+}
+
+pub(super) fn lower_bound(
+    data: &GameData,
+    request: &super::FactoryRequest,
+    doc: &BlueprintDocument,
+) -> Result<u64> {
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for e in &doc.blueprint.entities {
+        let p = super::entity(data, &e.name)?;
+        let (w, h) = if matches!(e.direction, 4 | 12) {
+            (p.tile_height, p.tile_width)
+        } else {
+            (p.tile_width, p.tile_height)
+        };
+        x0 = x0.min(e.position.x - f64::from(w) / 2.0);
+        x1 = x1.max(e.position.x + f64::from(w) / 2.0);
+        y0 = y0.min(e.position.y - f64::from(h) / 2.0);
+        y1 = y1.max(e.position.y + f64::from(h) / 2.0);
+    }
+    quality(data, request, doc, ((x1 - x0) * (y1 - y0)).round() as u64)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct LayoutSpec {
@@ -40,10 +81,15 @@ mod tests {
         let smallest = dimensions.candidates()[0];
         let mut attempted = Vec::new();
         assert!(
-            optimize(dimensions, &GenerationControl::default(), |spec, _| {
-                attempted.push(spec);
-                anyhow::bail!("infeasible candidate")
-            })
+            optimize(
+                dimensions,
+                &GenerationControl::default(),
+                |_, area| Ok(area),
+                |spec, _| {
+                    attempted.push(spec);
+                    anyhow::bail!("infeasible candidate")
+                }
+            )
             .is_err()
         );
         assert_eq!(attempted[0], smallest);
@@ -55,11 +101,16 @@ mod tests {
     fn cancellation_is_not_swallowed_as_an_infeasible_candidate() {
         let control = GenerationControl::default();
         let mut attempts = 0;
-        let result = optimize(large_dimensions(), &control, |_, _| {
-            attempts += 1;
-            control.cancel();
-            anyhow::bail!("Generation cancelled")
-        });
+        let result = optimize(
+            large_dimensions(),
+            &control,
+            |_, area| Ok(area),
+            |_, _| {
+                attempts += 1;
+                control.cancel();
+                anyhow::bail!("Generation cancelled")
+            },
+        );
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert_eq!(attempts, 1);
     }
@@ -163,6 +214,7 @@ impl Dimensions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Score {
+    quality: u64,
     area: u64,
     entities: usize,
     poles: usize,
@@ -171,7 +223,10 @@ struct Score {
 }
 
 impl Score {
-    fn of(factory: &GeneratedFactory) -> Self {
+    fn of(
+        factory: &GeneratedFactory,
+        measure_quality: &impl Fn(&GeneratedFactory, u64) -> Result<u64>,
+    ) -> Result<Self> {
         let entities = &factory.document.blueprint.entities;
         let (mut x0, mut y0, mut x1, mut y1) = (
             f64::INFINITY,
@@ -203,21 +258,23 @@ impl Score {
                 )
             })
             .sum();
-        Self {
+        Ok(Self {
+            quality: measure_quality(factory, width * height)?,
             area: width * height,
             entities: entities.len(),
             poles: factory.power.pole_count,
             perimeter: 2 * (width + height),
             wire_millitiles: (wire_length * 1000.0).round() as u64,
-        }
+        })
     }
 }
 
 pub(super) fn optimize(
     dimensions: Dimensions,
     control: &GenerationControl,
+    measure_quality: impl Fn(&GeneratedFactory, u64) -> Result<u64>,
     mut build_and_validate: impl FnMut(LayoutSpec, Option<u64>) -> Result<GeneratedFactory>,
-) -> Result<GeneratedFactory> {
+) -> Result<(GeneratedFactory, LayoutSpec)> {
     let legacy = dimensions.legacy();
     let mut candidates = dimensions.candidates();
     if !candidates.contains(&legacy) {
@@ -230,22 +287,34 @@ pub(super) fn optimize(
     })?;
     // Start with compact templates. The legacy layout remains a candidate, but
     // need not build an expensive sprawling power network just to set a bound.
-    let mut best: Option<(Score, GeneratedFactory)> = None;
+    let mut best: Option<(Score, GeneratedFactory, LayoutSpec)> = None;
     let mut failure = None;
+    // After finding a feasible factory, bound reconstruction work by machine
+    // count. Small factories still compare the full template set; large ones
+    // reserve work for the selected route's refinement instead of rebuilding
+    // dozens of complete networks with thousands of entities each.
+    let refinement_budget = (8192 / dimensions.count.max(1)).max(8);
+    let mut refinements = 0;
     for spec in candidates {
         control.check()?;
         control.update(|p| p.candidate += 1)?;
         if best
             .as_ref()
-            .is_some_and(|(score, _)| dimensions.production_area(spec) > score.area)
+            .is_some_and(|(score, _, _)| dimensions.production_area(spec) > score.quality)
         {
             continue;
         }
-        match build_and_validate(spec, best.as_ref().map(|(s, _)| s.area)) {
+        if best.is_some() {
+            if refinements >= refinement_budget {
+                break;
+            }
+            refinements += 1;
+        }
+        match build_and_validate(spec, best.as_ref().map(|(s, _, _)| s.quality)) {
             Ok(factory) => {
-                let score = Score::of(&factory);
-                if best.as_ref().is_none_or(|(old, _)| score < *old) {
-                    best = Some((score, factory));
+                let score = Score::of(&factory, &measure_quality)?;
+                if best.as_ref().is_none_or(|(old, _, _)| score < *old) {
+                    best = Some((score, factory, spec));
                 }
             }
             Err(error) => {
@@ -256,9 +325,10 @@ pub(super) fn optimize(
         }
     }
     control.check()?;
-    best.map(|(_, factory)| factory).ok_or_else(|| {
-        failure
-            .expect("at least the legacy candidate was attempted")
-            .context("No feasible layout among the candidate templates")
-    })
+    best.map(|(_, factory, spec)| (factory, spec))
+        .ok_or_else(|| {
+            failure
+                .expect("at least the legacy candidate was attempted")
+                .context("No feasible layout among the candidate templates")
+        })
 }

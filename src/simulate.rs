@@ -56,6 +56,13 @@ pub struct StorageMeasurement {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct OutputMeasurement {
+    pub output_entity: u32,
+    pub left_items: u64,
+    pub right_items: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SimulationReport {
     pub passed: bool,
     pub game_version: String,
@@ -77,6 +84,8 @@ pub struct SimulationReport {
     pub external_input_deliveries: Vec<InputMeasurement>,
     #[serde(default, deserialize_with = "crate::model::lua_vec")]
     pub storage_deliveries: Vec<StorageMeasurement>,
+    #[serde(default, deserialize_with = "crate::model::lua_vec")]
+    pub output_deliveries: Vec<OutputMeasurement>,
     #[serde(default)]
     pub input_measurement_location: String,
     #[serde(default)]

@@ -12,7 +12,7 @@ local report = {
   passed = false, game_version = script.active_mods.base, mods = {},
   entity_count = 0, pole_count = 0, network_count = 0, unpowered_entities = {},
   measured_output_per_second = 0, window_rates = {}, delivered_items = 0,
-  inserted_items = 0, input_deliveries = {}, external_input_deliveries = {}, storage_deliveries = {}, row_outputs = {}, warmup_ticks = opts.warmup_ticks,
+  inserted_items = 0, input_deliveries = {}, external_input_deliveries = {}, storage_deliveries = {}, output_deliveries = {}, row_outputs = {}, warmup_ticks = opts.warmup_ticks,
   input_measurement_location = common_input and "machines" or "boundary",
   output_measurement_location = storage_mode and "chests" or "belts",
   row_measurement_location = (storage_mode or collector_mode) and "machines" or "boundary",
@@ -192,6 +192,8 @@ script.on_init(function()
     local port = by_output[row.output.entity_number]
     if not port then
       port = {entity = real[row.output.entity_number], rows = {}, unexpected = 0}
+      port.measured = {output_entity = row.output.entity_number, left_items = 0, right_items = 0}
+      if not storage_mode then table.insert(report.output_deliveries, port.measured) end
       by_output[row.output.entity_number] = port
       table.insert(outputs, port)
     end
@@ -278,6 +280,8 @@ script.on_event(defines.events.on_tick, function()
       local count = line.remove_item({name = f.request.product, count = 100000})
       if tick > opts.warmup_ticks then
         delivered = delivered + count; window_count = window_count + count
+        local lane_key = lane == 1 and "left_items" or "right_items"
+        port.measured[lane_key] = port.measured[lane_key] + count
         local row = port.rows[lane]
         if collector_mode then
           -- Row contributions are measured at their machine inserters before

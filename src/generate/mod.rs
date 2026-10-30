@@ -9,7 +9,9 @@ mod layout;
 mod output_bus;
 mod output_check;
 mod power;
+mod route_cost;
 mod rows;
+mod spine_bus;
 mod transport;
 mod validate;
 
@@ -877,216 +879,220 @@ pub fn generate_blueprint_controlled(
     // not run at full modelled speed: rounding its count up must not force an
     // unnecessary extra output belt when two lanes can carry the whole target.
     let max_per_row = ((row_cap / (planned / count as f64)).floor() as usize).clamp(1, 64);
-    layout::optimize(
-        layout::Dimensions {
+    let dimensions = layout::Dimensions {
+        count,
+        max_per_row,
+        legacy_per_row,
+        input_belts: input_plan.belt_count as u32,
+        allow_paired: flow.ingredients.len() < 3,
+        machine_limit: request.max_machines_per_row,
+        width_limit: request.max_row_width,
+        machine: [machine.tile_width, machine.tile_height],
+        pole: [pole.tile_width, pole.tile_height],
+    };
+    let build_candidate = |spec: layout::LayoutSpec,
+                           best_quality: Option<u64>,
+                           refine: bool|
+     -> Result<GeneratedFactory> {
+        control.update(|p| p.stage = if refine { "bus" } else { "layout" })?;
+        let mut doc = BlueprintDocument::new(
+            &data.game_version,
+            format!("Factorium: {} >= {}/s", request.product, request.rate),
+        )?;
+        let mut rows = rows::Production {
+            request,
+            machine,
+            recipe: &recipe.prototype.name,
+            inputs: &flow.ingredients,
+            output_amount: b,
+            secondary,
+            input_plan: &input_plan,
+            arm_columns: &arm_columns,
             count,
-            max_per_row,
-            legacy_per_row,
-            input_belts: input_plan.belt_count as u32,
-            allow_paired: flow.ingredients.len() < 3,
-            machine_limit: request.max_machines_per_row,
-            width_limit: request.max_row_width,
-            machine: [machine.tile_width, machine.tile_height],
-            pole: [pole.tile_width, pole.tile_height],
-        },
-        control,
-        |spec, best_area| {
-            control.update(|p| p.stage = "layout")?;
-            let mut doc = BlueprintDocument::new(
-                &data.game_version,
-                format!("Factorium: {} >= {}/s", request.product, request.rate),
-            )?;
-            let mut rows = rows::Production {
-                request,
-                machine,
-                recipe: &recipe.prototype.name,
-                inputs: &flow.ingredients,
-                output_amount: b,
-                secondary,
-                input_plan: &input_plan,
-                arm_columns: &arm_columns,
-                count,
-                planned,
-            }
-            .place(&mut doc, spec);
-            control.check()?;
-            let (bus, storage, markers) = infrastructure::place(
-                data,
-                request,
-                &mut rows,
-                &mut doc,
-                infrastructure::Rates {
-                    belt: belt_rate,
-                    arm: arm_rate,
-                    machine_output: crafts * b,
-                },
-            )?;
+            planned,
+        }
+        .place(&mut doc, spec);
+        control.check()?;
+        if let Some(limit) = best_quality {
             ensure!(
-                doc.blueprint.entities.len() <= 50000,
-                "Layout exceeds prototype entity budget"
+                layout::lower_bound(data, request, &doc)? <= limit,
+                "Production already exceeds the best transport/area score"
             );
-            if let Some(best_area) = best_area {
-                // Infrastructure changes the footprint substantially. Reject
-                // candidates that already exceed the incumbent before the
-                // more expensive power-network search. Poles can only expand it.
-                let (mut x0, mut y0, mut x1, mut y1) = (
-                    f64::INFINITY,
-                    f64::INFINITY,
-                    f64::NEG_INFINITY,
-                    f64::NEG_INFINITY,
-                );
-                for e in &doc.blueprint.entities {
-                    let p = entity(data, &e.name)?;
-                    let (w, h) = if matches!(e.direction, 4 | 12) {
-                        (p.tile_height, p.tile_width)
-                    } else {
-                        (p.tile_width, p.tile_height)
-                    };
-                    x0 = x0.min(e.position.x - f64::from(w) / 2.0);
-                    x1 = x1.max(e.position.x + f64::from(w) / 2.0);
-                    y0 = y0.min(e.position.y - f64::from(h) / 2.0);
-                    y1 = y1.max(e.position.y + f64::from(h) / 2.0);
-                }
-                ensure!(
-                    ((x1 - x0) * (y1 - y0)).round() as u64 <= best_area,
-                    "Layout already exceeds the best candidate footprint"
-                );
-            }
-            control.update(|p| p.stage = "power")?;
-            let mut power = power::place_and_wire(data, &mut doc, &request.pole, &rows, control)?;
-            let demand = |e: &Entity| -> Result<f64> {
-                Ok((stat(e, "max_energy_usage")?
-                    + e.prototype
+        }
+        let (bus, storage, markers) = infrastructure::place(
+            data,
+            request,
+            &mut rows,
+            &mut doc,
+            infrastructure::Rates {
+                belt: belt_rate,
+                arm: arm_rate,
+                machine_output: crafts * b,
+            },
+            control,
+            refine,
+        )?;
+        ensure!(
+            doc.blueprint.entities.len() <= 50000,
+            "Layout exceeds prototype entity budget"
+        );
+        if let Some(limit) = best_quality {
+            ensure!(
+                layout::lower_bound(data, request, &doc)? <= limit,
+                "Layout already exceeds the best transport/area score"
+            );
+        }
+        control.update(|p| p.stage = "power")?;
+        let mut power = power::place_and_wire(data, &mut doc, &request.pole, &rows, control)?;
+        let demand = |e: &Entity| -> Result<f64> {
+            Ok((stat(e, "max_energy_usage")?
+                + e.prototype
+                    .properties
+                    .get("electric_energy_source")
+                    .and_then(|v| v.get("drain"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0))
+                * 60.0)
+        };
+        power.installed_power_watts = doc.blueprint.entities.iter().try_fold(0.0, |total, e| {
+            let proto = entity(data, &e.name)?;
+            Ok::<_, anyhow::Error>(
+                total
+                    + if proto
+                        .prototype
                         .properties
-                        .get("electric_energy_source")
-                        .and_then(|v| v.get("drain"))
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0))
-                    * 60.0)
-            };
-            power.installed_power_watts =
-                doc.blueprint.entities.iter().try_fold(0.0, |total, e| {
-                    let proto = entity(data, &e.name)?;
-                    Ok::<_, anyhow::Error>(
-                        total
-                            + if proto
-                                .prototype
-                                .properties
-                                .contains_key("electric_energy_source")
-                            {
-                                demand(proto)?
-                            } else {
-                                0.0
-                            },
-                    )
-                })?;
-            let input_summary = flow
+                        .contains_key("electric_energy_source")
+                    {
+                        demand(proto)?
+                    } else {
+                        0.0
+                    },
+            )
+        })?;
+        let input_summary = flow
+            .ingredients
+            .iter()
+            .map(|(item, amount)| {
+                format!(
+                    "{item}: target {:.3}/s, supply {:.3}/s",
+                    request.rate * amount / b,
+                    planned * amount / b
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        doc.blueprint.description = format!(
+            "Output >= {:.3} {}/s; inputs: {} (5% headroom). Normal quality, no modules, stack size 1. Connect external power to pole #{} ({:.1},{:.1}); installed load <= {:.0} W. {} input belts and {} output belts. See factory.json for port coordinates. Throughput is modelled until verified in game.",
+            request.rate,
+            request.product,
+            input_summary,
+            power.connection_entity,
+            power.connection_position.x,
+            power.connection_position.y,
+            power.installed_power_watts,
+            bus.as_ref()
+                .map(|b| b
+                    .lines
+                    .iter()
+                    .map(|l| l.source.entity_number)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len())
+                .unwrap_or_else(|| rows
+                    .iter()
+                    .flat_map(ProductionRow::input_ports)
+                    .map(|p| p.entity_number)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()),
+            rows.iter()
+                .map(|r| r.output.entity_number)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        );
+        if bus.as_ref().is_some_and(|b| b.compact) {
+            doc.blueprint.description.push_str(" Compact shared bus: ingredient belts enter from the west; splitters branch locally beside their production rows. Outputs are merged by belt capacity alongside the rows.");
+        } else if bus.is_some() && !request.reverse_output {
+            doc.blueprint.description.push_str(" Shared bus: connect separate ingredient belts from the north; splitters redistribute flow between rows.");
+        }
+        if request.reverse_output {
+            doc.blueprint.description.push_str(" Inputs and outputs are on the west side. Supply ingredients from the west; continue output belts to the west.");
+        }
+        if !storage.is_empty() {
+            doc.blueprint
+                .description
+                .push_str(" Output goes into finite chest storage; production stops when full.");
+        }
+        let entity_sizes = doc
+            .blueprint
+            .entities
+            .iter()
+            .map(|e| {
+                let p = entity(data, &e.name)?;
+                Ok((e.name.clone(), [p.tile_width, p.tile_height]))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let factory = GeneratedFactory {
+            schema_version: 1,
+            game_version: data.game_version.clone(),
+            mods: data.mods.clone(),
+            request: request.clone(),
+            recipe: recipe.prototype.name.clone(),
+            input_item: input_item.clone(),
+            inputs: flow
                 .ingredients
                 .iter()
-                .map(|(item, amount)| {
-                    format!(
-                        "{item}: target {:.3}/s, supply {:.3}/s",
-                        request.rate * amount / b,
-                        planned * amount / b
-                    )
+                .enumerate()
+                .map(|(i, (item, amount))| InputRequirement {
+                    item: item.clone(),
+                    per_second: request.rate * amount / b,
+                    supplied_per_second: planned * amount / b,
+                    inserter: if input_plan.reaches[i] == 2 {
+                        secondary.unwrap().prototype.name.clone()
+                    } else {
+                        request.inserter.clone()
+                    },
+                    inserter_items_per_second: if input_plan.reaches[i] == 2 {
+                        secondary_rate
+                    } else {
+                        arm_rate
+                    },
                 })
-                .collect::<Vec<_>>()
-                .join("; ");
-            doc.blueprint.description = format!(
-                "Output >= {:.3} {}/s; inputs: {} (5% headroom). Normal quality, no modules, stack size 1. Connect external power to pole #{} ({:.1},{:.1}); installed load <= {:.0} W. {} input belts and {} output belts. See factory.json for port coordinates. Throughput is modelled until verified in game.",
-                request.rate,
-                request.product,
-                input_summary,
-                power.connection_entity,
-                power.connection_position.x,
-                power.connection_position.y,
-                power.installed_power_watts,
-                bus.as_ref()
-                    .map(|b| b
-                        .lines
-                        .iter()
-                        .map(|l| l.source.entity_number)
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .len())
-                    .unwrap_or_else(|| rows
-                        .iter()
-                        .flat_map(ProductionRow::input_ports)
-                        .map(|p| p.entity_number)
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .len()),
-                rows.iter()
-                    .map(|r| r.output.entity_number)
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len()
-            );
-            if bus.as_ref().is_some_and(|b| b.compact) {
-                doc.blueprint.description.push_str(" Compact shared bus: ingredient belts enter from the west; splitters branch locally beside their production rows. Outputs are merged by belt capacity alongside the rows.");
-            } else if bus.is_some() && !request.reverse_output {
-                doc.blueprint.description.push_str(" Shared bus: connect separate ingredient belts from the north; splitters redistribute flow between rows.");
-            }
-            if request.reverse_output {
-                doc.blueprint.description.push_str(" Inputs and outputs are on the west side. Supply ingredients from the west; continue output belts to the west.");
-            }
-            if !storage.is_empty() {
-                doc.blueprint.description.push_str(
-                    " Output goes into finite chest storage; production stops when full.",
-                );
-            }
-            let entity_sizes = doc
-                .blueprint
-                .entities
-                .iter()
-                .map(|e| {
-                    let p = entity(data, &e.name)?;
-                    Ok((e.name.clone(), [p.tile_width, p.tile_height]))
-                })
-                .collect::<Result<BTreeMap<_, _>>>()?;
-            let factory = GeneratedFactory {
-                schema_version: 1,
-                game_version: data.game_version.clone(),
-                mods: data.mods.clone(),
-                request: request.clone(),
-                recipe: recipe.prototype.name.clone(),
-                input_item: input_item.clone(),
-                inputs: flow
-                    .ingredients
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (item, amount))| InputRequirement {
-                        item: item.clone(),
-                        per_second: request.rate * amount / b,
-                        supplied_per_second: planned * amount / b,
-                        inserter: if input_plan.reaches[i] == 2 {
-                            secondary.unwrap().prototype.name.clone()
-                        } else {
-                            request.inserter.clone()
-                        },
-                        inserter_items_per_second: if input_plan.reaches[i] == 2 {
-                            secondary_rate
-                        } else {
-                            arm_rate
-                        },
-                    })
-                    .collect(),
-                machine_count: count,
-                input_per_second: request.rate * a / b,
-                supplied_input_per_second: planned * a / b,
-                planned_output_per_second: planned,
-                machine_crafts_per_second: crafts,
-                inserter_items_per_second: arm_rate,
-                belt_items_per_second: belt_rate,
-                power,
-                rows,
-                entity_sizes,
-                document: doc,
-                bus,
-                storage,
-                markers,
-            };
-            control.update(|p| p.stage = "validation")?;
-            validate_factory(data, &factory)?;
+                .collect(),
+            machine_count: count,
+            input_per_second: request.rate * a / b,
+            supplied_input_per_second: planned * a / b,
+            planned_output_per_second: planned,
+            machine_crafts_per_second: crafts,
+            inserter_items_per_second: arm_rate,
+            belt_items_per_second: belt_rate,
+            power,
+            rows,
+            entity_sizes,
+            document: doc,
+            bus,
+            storage,
+            markers,
+        };
+        control.update(|p| p.stage = "validation")?;
+        validate_factory(data, &factory)?;
+        control.check()?;
+        Ok(factory)
+    };
+    let (factory, spec) = layout::optimize(
+        dimensions,
+        control,
+        |factory, area| layout::quality(data, &factory.request, &factory.document, area),
+        |spec, bound| build_candidate(spec, bound, false),
+    )?;
+    if request.common_input {
+        control.update(|p| p.stage = "bus")?;
+        let bound = layout::lower_bound(data, request, &factory.document)?;
+        if let Ok(refined) = build_candidate(spec, Some(bound), true) {
             control.check()?;
-            Ok(factory)
-        },
-    )
+            if layout::lower_bound(data, request, &refined.document)? <= bound {
+                return Ok(refined);
+            }
+        }
+    }
+    control.check()?;
+    Ok(factory)
 }

@@ -7,6 +7,145 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use factorium::{FactoryRequest, generate_blueprint, validate_factory};
 
 #[test]
+fn packed_three_ingredient_bus_reuses_columns_and_balances_even_small_outputs() -> Result<()> {
+    let mut raw = common::catalog_value();
+    let mut recipe = raw["recipes"]["advanced-circuit"].clone();
+    recipe["name"] = json!("low-density-structure");
+    recipe["energy"] = json!(20.0);
+    recipe["ingredients"] = json!([
+        {"type":"item","name":"copper-plate","amount":20},
+        {"type":"item","name":"steel-plate","amount":2},
+        {"type":"item","name":"plastic-bar","amount":5}
+    ]);
+    recipe["products"][0]["name"] = json!("low-density-structure");
+    raw["recipes"]["low-density-structure"] = recipe;
+    let mut item = raw["items"]["advanced-circuit"].clone();
+    item["name"] = json!("low-density-structure");
+    raw["items"]["low-density-structure"] = item;
+    let mut machine = raw["entities"]["assembling-machine-2"].clone();
+    machine["name"] = json!("assembling-machine-3");
+    machine["quality_stats"]["normal"]["crafting_speed"] = json!(1.25);
+    raw["entities"]["assembling-machine-3"] = machine;
+    for (old, new) in [
+        ("fast-transport-belt", "turbo-transport-belt"),
+        ("fast-splitter", "turbo-splitter"),
+        ("fast-underground-belt", "turbo-underground-belt"),
+    ] {
+        let mut prototype = raw["entities"][old].clone();
+        prototype["name"] = json!(new);
+        prototype["belt_speed"] = json!(0.125);
+        prototype["max_underground_distance"] = json!(10);
+        raw["entities"][new] = prototype;
+    }
+    let data = serde_json::from_value(raw)?;
+    for reverse in [true, false] {
+        let mut request = FactoryRequest::new("low-density-structure", 1.0);
+        request.machine = "assembling-machine-3".into();
+        request.belt = "turbo-transport-belt".into();
+        request.common_input = true;
+        request.reverse_output = reverse;
+        request.input_markers = true;
+        request.max_machines_per_row = Some(14);
+        let factory = generate_blueprint(&data, &request)?;
+        validate_factory(&data, &factory)?;
+        assert!(factory.rows.len() >= 4);
+        assert_eq!(factory.input_belt_count(), 2);
+        let west = factory
+            .external_inputs()
+            .iter()
+            .map(|p| p.position.x)
+            .fold(f64::INFINITY, f64::min);
+        let row_start = factory
+            .input_ports()
+            .map(|p| p.position.x)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            row_start - west <= 16.0,
+            "bus extends {} tiles west of the rows",
+            row_start - west
+        );
+        let top = factory
+            .input_ports()
+            .map(|p| p.position.y)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(
+            factory
+                .external_inputs()
+                .iter()
+                .map(|p| p.position.y)
+                .fold(f64::INFINITY, f64::min),
+            top
+        );
+        assert_eq!(factory.output_ports().len(), 1);
+        assert_eq!(factory.output_ports()[0].lanes, "both");
+        let bus = factory.bus.as_ref().unwrap();
+        for line in &bus.lines {
+            let transport: Vec<_> = line
+                .entities
+                .iter()
+                .map(|&id| &factory.document.blueprint.entities[(id - 1) as usize])
+                .collect();
+            assert!(
+                transport.iter().all(|e| e.direction != 0),
+                "ingredient route must not travel back north"
+            );
+            let columns: std::collections::BTreeSet<_> = transport
+                .iter()
+                .filter(|e| e.direction == 8 && e.name != bus.splitter)
+                .map(|e| e.position.x.floor() as i32)
+                .collect();
+            assert_eq!(
+                columns.len(),
+                1,
+                "each ingredient must use one straight vertical trunk"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn one_row_shared_bus_also_balances_the_external_output() -> Result<()> {
+    let data = common::catalog();
+    for reverse in [true, false] {
+        let mut request = FactoryRequest::new("iron-gear-wheel", 0.5);
+        request.common_input = true;
+        request.reverse_output = reverse;
+        let factory = generate_blueprint(&data, &request)?;
+        assert_eq!(factory.rows.len(), 1);
+        assert_eq!(factory.output_ports()[0].lanes, "both");
+        validate_factory(&data, &factory)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn dense_headers_at_output_height_remain_separate_from_production_belts() -> Result<()> {
+    let data = common::catalog();
+    let mut request = FactoryRequest::new("advanced-circuit", 10.0);
+    request.common_input = true;
+    request.max_machines_per_row = Some(4);
+    request.pole = "substation".into();
+    let factory = generate_blueprint(&data, &request)?;
+    assert!(factory.external_inputs().iter().any(|input| {
+        factory
+            .rows
+            .iter()
+            .any(|row| input.position.y == row.production_output.as_ref().unwrap().position.y)
+    }));
+    validate_factory(&data, &factory)?;
+    let mut broken = factory.clone();
+    let id = factory.rows[0]
+        .production_output
+        .as_ref()
+        .unwrap()
+        .entity_number;
+    broken.document.blueprint.entities[(id - 1) as usize].direction = 8;
+    assert!(validate_factory(&data, &broken).is_err());
+    Ok(())
+}
+
+#[test]
 fn compact_bus_keeps_sixty_plate_ports_inside_the_production_height() -> Result<()> {
     let mut raw = common::catalog_value();
     raw["recipes"]["iron-plate"]["energy"] = json!(3.2);
@@ -156,9 +295,8 @@ fn small_poles_follow_matching_regular_lines_between_furnace_inserters() -> Resu
     let mut r = FactoryRequest::new("iron-plate", 5.0);
     r.machine = "electric-furnace".into();
     r.belt = "fast-transport-belt".into();
-    r.common_input = true;
-    r.reverse_output = true;
-    r.input_markers = true;
+    // Isolate the repeating production power pattern from the optional bus,
+    // whose collector footprint can change the optimizer's preferred row count.
     let f = generate_blueprint(&data, &r)?;
     validate_factory(&data, &f)?;
     assert_eq!(f.machine_count, 9);

@@ -5,6 +5,52 @@ use factorium::{
 };
 
 #[test]
+#[ignore = "requires Factorio; cargo test --release --test generation_game narrow_bus -- --ignored --nocapture"]
+fn narrow_bus_preserves_throughput_and_feeds_both_output_lanes() -> Result<()> {
+    let binary = discover_factorio()?;
+    let mut game = ExtractOptions::new(&binary);
+    game.mod_directory = discover_mod_directory(&binary);
+    let export = tempfile::tempdir()?;
+    let data = extract_game_data(&game, export.path())?;
+    for reverse in [true, false] {
+        let mut request = FactoryRequest::new("low-density-structure", 1.0);
+        request.machine = "assembling-machine-3".into();
+        request.belt = "turbo-transport-belt".into();
+        request.inserter = "stack-inserter".into();
+        request.common_input = true;
+        request.reverse_output = reverse;
+        request.input_markers = true;
+        request.max_machines_per_row = Some(14);
+        let factory = generate_blueprint(&data, &request)?;
+        let report = verify_in_game(
+            &data,
+            &factory,
+            &game,
+            &SimulationOptions {
+                warmup_ticks: 900 * 60,
+                measurement_ticks: 600 * 60,
+            },
+        )?;
+        eprintln!(
+            "Narrow bus reverse={reverse}: {:.3}/s, lanes {:?}",
+            report.measured_output_per_second, report.output_deliveries
+        );
+        assert!(report.passed, "{report:#?}");
+        assert!(report.row_outputs.iter().all(|row| row.delivered_items > 0));
+        assert_eq!(report.output_deliveries.len(), 1);
+        for output in &report.output_deliveries {
+            assert!(output.left_items > 0 && output.right_items > 0);
+            assert!(output.left_items.abs_diff(output.right_items) <= 2);
+            assert_eq!(
+                output.left_items + output.right_items,
+                report.delivered_items
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires Factorio; cargo test --test generation_game merged_bus -- --ignored --nocapture"]
 fn merged_bus_preserves_output_throughput_above_half_a_belt() -> Result<()> {
     let binary = discover_factorio()?;
@@ -15,6 +61,7 @@ fn merged_bus_preserves_output_throughput_above_half_a_belt() -> Result<()> {
     for (product, rate) in [
         ("automation-science-pack", 5.0),
         ("automation-science-pack", 12.0),
+        ("automation-science-pack", 14.0),
         ("advanced-circuit", 5.0),
     ] {
         for reverse in [true, false] {
@@ -30,9 +77,13 @@ fn merged_bus_preserves_output_throughput_above_half_a_belt() -> Result<()> {
                 &factory,
                 &game,
                 &SimulationOptions {
-                    // Fill the long ingredient buses before measuring the
-                    // collector; a cold bus can take over ten minutes to settle.
-                    warmup_ticks: 54000,
+                    // Sequential taps fill their branch buffers before the
+                    // downstream rows settle, especially near full belt load.
+                    warmup_ticks: if product == "automation-science-pack" && rate >= 12.0 {
+                        1800 * 60
+                    } else {
+                        900 * 60
+                    },
                     measurement_ticks: 18000,
                 },
             )?;
@@ -42,6 +93,12 @@ fn merged_bus_preserves_output_throughput_above_half_a_belt() -> Result<()> {
             );
             assert!(report.passed, "{report:#?}");
             assert!(report.row_outputs.iter().all(|row| row.delivered_items > 0));
+            assert!(
+                report
+                    .output_deliveries
+                    .iter()
+                    .all(|output| output.left_items > 0 && output.right_items > 0)
+            );
         }
     }
     Ok(())

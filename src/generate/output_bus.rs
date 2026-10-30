@@ -15,9 +15,6 @@ pub(super) fn place(
     capacity: f64,
 ) -> Result<()> {
     let groups = groups(rows, capacity);
-    if groups.len() == 1 && groups[0].len() == 1 && !request.reverse_output {
-        return Ok(());
-    }
     let balance_groups: Vec<_> = groups
         .iter()
         .map(|g| needs_balance(rows, g, capacity))
@@ -58,29 +55,21 @@ pub(super) fn place(
             let x = port.position.x.floor() as i32;
             let y = port.position.y.floor() as i32;
             if group.len() == 1 {
-                last = route.run((x + step, y), (boundary * step, y), direction, direction)?;
+                last = finish(
+                    &mut route,
+                    &bus.splitter,
+                    (x * step + 1, y),
+                    boundary,
+                    step,
+                    true,
+                )?;
                 continue;
             }
             route.run((x + step, y), (feed * step, y), direction, 0)?;
             route.belt(feed * step, y - 1, 0)?;
             route.belt(feed * step, y - 2, direction)?;
             let start = if balance_groups[i] {
-                // Split evenly and side-load from opposite sides to use both lanes.
-                route.splitter((feed + 1) * step, y - 2, direction, &bus.splitter)?;
-                for (u, ty, d) in [
-                    (feed + 2, y - 2, 0),
-                    (feed + 2, y - 3, direction),
-                    (feed + 3, y - 3, direction),
-                    (feed + 4, y - 3, 8),
-                    (feed + 2, y - 1, 8),
-                    (feed + 2, y, direction),
-                    (feed + 3, y, direction),
-                    (feed + 4, y, 0),
-                    (feed + 4, y - 1, 0),
-                    (feed + 4, y - 2, direction),
-                ] {
-                    route.belt(u * step, ty, d)?;
-                }
+                balance(&mut route, &bus.splitter, feed, y, step)?;
                 feed + 5
             } else {
                 feed + 1
@@ -102,11 +91,13 @@ pub(super) fn place(
             )?;
             if j + 1 == group.len() {
                 route.belt(column * step, y, direction)?;
-                last = route.run(
-                    ((column + 1) * step, y),
-                    (boundary * step, y),
-                    direction,
-                    direction,
+                last = finish(
+                    &mut route,
+                    &bus.splitter,
+                    (column + 1, y),
+                    boundary,
+                    step,
+                    !balance_groups[i],
                 )?;
             }
             previous_y = Some(y);
@@ -119,13 +110,58 @@ pub(super) fn place(
             row.production_output = Some(row.output.clone());
             row.output.entity_number = last;
             row.output.position = route.doc.blueprint.entities[(last - 1) as usize].position;
-            if balance_groups[i] {
-                row.output.lanes = "both".into();
-            }
+            row.output.lanes = "both".into();
         }
     }
     bus.output_entities = (begin..=route.doc.blueprint.entities.len() as u32).collect();
     Ok(())
+}
+
+/// Split one stream evenly, then side-load its halves onto opposite lanes.
+/// The caller supplies the north-facing inlet at (feed * step, y).
+fn balance(route: &mut Router<'_>, splitter: &str, feed: i32, y: i32, step: i32) -> Result<()> {
+    let direction = if step < 0 { 12 } else { 4 };
+    route.splitter((feed + 1) * step, y - 2, direction, splitter)?;
+    for (u, ty, d) in [
+        (feed + 2, y - 2, 0),
+        (feed + 2, y - 3, direction),
+        (feed + 3, y - 3, direction),
+        (feed + 4, y - 3, 8),
+        (feed + 2, y - 1, 8),
+        (feed + 2, y, direction),
+        (feed + 3, y, direction),
+        (feed + 4, y, 0),
+        (feed + 4, y - 1, 0),
+        (feed + 4, y - 2, direction),
+    ] {
+        route.belt(u * step, ty, d)?;
+    }
+    Ok(())
+}
+
+fn finish(
+    route: &mut Router<'_>,
+    splitter: &str,
+    start: (i32, i32),
+    boundary: i32,
+    step: i32,
+    balanced: bool,
+) -> Result<u32> {
+    let direction = if step < 0 { 12 } else { 4 };
+    let (feed, y) = start;
+    if !balanced {
+        return route.run((feed * step, y), (boundary * step, y), direction, direction);
+    }
+    route.belt(feed * step, y, 0)?;
+    route.belt(feed * step, y - 1, 0)?;
+    route.belt(feed * step, y - 2, direction)?;
+    balance(route, splitter, feed, y, step)?;
+    route.run(
+        ((feed + 5) * step, y - 2),
+        (boundary * step, y - 2),
+        direction,
+        direction,
+    )
 }
 
 pub(super) fn groups(rows: &[ProductionRow], capacity: f64) -> Vec<Vec<BeltPort>> {

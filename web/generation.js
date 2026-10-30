@@ -33,7 +33,7 @@ export class GenerationTask {
 }
 
 export function generationProgress(progress={},seconds=0) {
-  const stage={layout:'Строим линию',power:'Рассчитываем электросеть',validation:'Проверяем чертёж'}[progress.stage] || 'Подготавливаем расчёт';
+  const stage={layout:'Строим линию',bus:'Уплотняем шину',power:'Рассчитываем электросеть',validation:'Проверяем чертёж'}[progress.stage] || 'Подготавливаем расчёт';
   return [stage,progress.machines?`${progress.machines} машин`:null,
     progress.candidates?`вариант ${progress.candidate} из ${progress.candidates}`:null,`${seconds} с`].filter(Boolean).join(' · ');
 }

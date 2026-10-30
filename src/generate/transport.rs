@@ -161,6 +161,9 @@ pub(super) fn validate(
             "Output collector overlaps an input route"
         );
     }
+    // Dense external headers can share a height with a production output.
+    // Their independently validated routes are not part of that production belt.
+    let infrastructure_belts = used_belts.clone();
     let mut used_machines = BTreeSet::new();
     let mut used_arms = extra.arms;
     let mut output_paths: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
@@ -294,6 +297,7 @@ pub(super) fn validate(
                 e.name == f.request.belt
                     && e.direction == direction
                     && e.position.y == last.position.y
+                    && !infrastructure_belts.contains(&e.entity_number)
             })
             .min_by(|a, b| {
                 if direction == 12 {

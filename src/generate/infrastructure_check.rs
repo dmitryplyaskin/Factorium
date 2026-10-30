@@ -1,7 +1,13 @@
 //! Independently reconstruct optional infrastructure from physical connections.
 
-use super::{GeneratedFactory, entity, infrastructure::marker_behavior};
-use crate::{GameData, blueprint::BlueprintEntity};
+use super::{
+    FactoryRequest, GeneratedFactory, InputBus, ProductionRow, entity,
+    infrastructure::marker_behavior, power::tiles,
+};
+use crate::{
+    GameData,
+    blueprint::{BlueprintDocument, BlueprintEntity},
+};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -21,23 +27,50 @@ fn delta(direction: u8) -> Result<(i32, i32)> {
     }
 }
 
-pub(super) fn validate(
+pub(super) fn validate_bus(
     data: &GameData,
-    f: &GeneratedFactory,
+    request: &FactoryRequest,
+    rows: &[ProductionRow],
+    doc: &BlueprintDocument,
+    bus: &InputBus,
+    belt_rate: f64,
+) -> Result<()> {
+    let mut occupied = HashMap::new();
+    let mut ids = BTreeMap::new();
+    for e in &doc.blueprint.entities {
+        ids.insert(e.entity_number, e);
+        for tile in tiles(e, entity(data, &e.name)?)? {
+            ensure!(
+                occupied.insert(tile, e.entity_number).is_none(),
+                "Overlapping input route"
+            );
+        }
+    }
+    validate_inputs(data, request, rows, Some(bus), belt_rate, &ids, &occupied)?;
+    Ok(())
+}
+
+fn validate_inputs(
+    data: &GameData,
+    request: &FactoryRequest,
+    rows: &[ProductionRow],
+    bus: Option<&InputBus>,
+    belt_rate: f64,
     ids: &BTreeMap<u32, &BlueprintEntity>,
     occupied: &HashMap<(i32, i32), u32>,
-) -> Result<Used> {
+) -> Result<BTreeSet<u32>> {
     let mut used = Used::default();
     ensure!(
-        f.request.common_input == f.bus.is_some(),
+        request.common_input == bus.is_some(),
         "Common input option/bus mismatch"
     );
-    let row_ports: HashMap<_, _> = f
-        .input_ports()
+    let row_ports: HashMap<_, _> = rows
+        .iter()
+        .flat_map(ProductionRow::input_ports)
         .map(|p| ((p.entity_number, p.item.as_str()), p))
         .collect();
     let mut claimed = BTreeSet::new();
-    if let Some(bus) = &f.bus {
+    if let Some(bus) = bus {
         let split = entity(data, &bus.splitter)?;
         let ug = entity(data, &bus.underground)?;
         ensure!(
@@ -50,7 +83,7 @@ pub(super) fn validate(
                 && [ug.tile_width, ug.tile_height] == [1, 1],
             "Invalid bus underground belt"
         );
-        let speed = entity(data, &f.request.belt)?
+        let speed = entity(data, &request.belt)?
             .prototype
             .properties
             .get("belt_speed");
@@ -75,7 +108,7 @@ pub(super) fn validate(
                 line.source.rate.is_finite()
                     && line.source.rate > 0.0
                     && line.source.rate
-                        <= f.belt_items_per_second
+                        <= belt_rate
                             * if line.source.lanes == "both" {
                                 0.85
                             } else {
@@ -88,9 +121,9 @@ pub(super) fn validate(
                 .get(&line.source.entity_number)
                 .context("Missing bus inlet")?;
             ensure!(
-                source.name == f.request.belt
+                source.name == request.belt
                     && source.direction
-                        == if bus.compact || f.request.reverse_output {
+                        == if bus.compact || request.reverse_output {
                             4
                         } else {
                             8
@@ -137,10 +170,13 @@ pub(super) fn validate(
                 let mut next = Vec::new();
                 let mut paired = false;
                 if e.name == bus.underground && e.belt_type.as_deref() == Some("input") {
-                    ensure!(e.direction == 4, "Underground input must face east");
+                    let (dx, dy) = delta(e.direction)?;
                     for n in 1..=reach {
                         if let Some(other) = occupied
-                            .get(&(e.position.x.floor() as i32 + n, e.position.y.floor() as i32))
+                            .get(&(
+                                e.position.x.floor() as i32 + n * dx,
+                                e.position.y.floor() as i32 + n * dy,
+                            ))
                             .and_then(|id| ids.get(id))
                         {
                             if other.name == bus.underground
@@ -157,10 +193,19 @@ pub(super) fn validate(
                 } else {
                     let positions = if e.name == bus.splitter {
                         if bus.compact {
-                            ensure!(e.direction == 4, "Compact bus splitter must face east");
-                            let x = e.position.x.floor() as i32;
-                            let y = (e.position.y - 1.0).round() as i32;
-                            vec![(x + 1, y), (x + 1, y + 1)]
+                            ensure!(
+                                matches!(e.direction, 4 | 8),
+                                "Unsupported compact bus splitter direction"
+                            );
+                            if e.direction == 4 {
+                                let x = e.position.x.floor() as i32;
+                                let y = (e.position.y - 1.0).round() as i32;
+                                vec![(x + 1, y), (x + 1, y + 1)]
+                            } else {
+                                let x = (e.position.x - 1.0).round() as i32;
+                                let y = e.position.y.floor() as i32;
+                                vec![(x, y + 1), (x + 1, y + 1)]
+                            }
                         } else {
                             ensure!(e.direction == 8, "Bus splitter must face south");
                             let x = (e.position.x - 1.0).round() as i32;
@@ -169,7 +214,7 @@ pub(super) fn validate(
                         }
                     } else {
                         ensure!(
-                            e.name == f.request.belt
+                            e.name == request.belt
                                 || (e.name == bus.underground
                                     && e.belt_type.as_deref() == Some("output")),
                             "Unexpected entity on input bus"
@@ -187,7 +232,7 @@ pub(super) fn validate(
                             route.contains(&target) || targets.contains(&target),
                             "Input bus leaks into another belt/entity"
                         );
-                        if to.name == f.request.belt {
+                        if to.name == request.belt {
                             ensure!(
                                 to.direction != (e.direction + 8) % 16,
                                 "Input bus enters the front of a belt"
@@ -253,6 +298,27 @@ pub(super) fn validate(
             "Common input does not supply every ingredient/row"
         );
     }
+    Ok(used.belts)
+}
+
+pub(super) fn validate(
+    data: &GameData,
+    f: &GeneratedFactory,
+    ids: &BTreeMap<u32, &BlueprintEntity>,
+    occupied: &HashMap<(i32, i32), u32>,
+) -> Result<Used> {
+    let mut used = Used {
+        belts: validate_inputs(
+            data,
+            &f.request,
+            &f.rows,
+            f.bus.as_ref(),
+            f.belt_items_per_second,
+            ids,
+            occupied,
+        )?,
+        ..Used::default()
+    };
     let outputs = f.output_ports();
     let mut stored = BTreeSet::new();
     let mut chest_ids = BTreeSet::new();
