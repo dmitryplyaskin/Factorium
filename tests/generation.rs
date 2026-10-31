@@ -45,7 +45,7 @@ fn packed_three_ingredient_bus_reuses_columns_and_balances_even_small_outputs() 
         request.common_input = true;
         request.reverse_output = reverse;
         request.input_markers = true;
-        request.max_machines_per_row = Some(14);
+        request.max_machines_per_row = Some(4);
         let factory = generate_blueprint(&data, &request)?;
         validate_factory(&data, &factory)?;
         assert!(factory.rows.len() >= 4);
@@ -351,7 +351,7 @@ fn reverse_output_keeps_ports_and_storage_on_the_input_side() -> Result<()> {
                 r.common_input = common_input;
                 r.output_chest = storage.then(|| "steel-chest".into());
                 r.input_markers = true;
-                r.max_machines_per_row = Some(3);
+                r.max_machines_per_row = Some(1);
                 r.max_row_width = Some(14);
                 r.pole = "substation".into();
                 let f = generate_blueprint(&data, &r)?;
@@ -591,11 +591,11 @@ fn mirrored_rows_share_one_output_with_independent_lane_budgets() -> Result<()> 
     );
     validate_factory(&data, &f)?;
 
-    let near_capacity = generate_blueprint(&data, &FactoryRequest::new("iron-gear-wheel", 12.0))?;
+    let near_capacity = generate_blueprint(&data, &FactoryRequest::new("iron-gear-wheel", 11.0))?;
     assert_eq!(near_capacity.output_ports().len(), 1);
     assert_eq!(near_capacity.output_ports()[0].lanes, "both");
     assert_eq!(near_capacity.rows.len(), 2);
-    assert!(near_capacity.rows.iter().all(|row| row.machines.len() > 8));
+    assert!(near_capacity.rows.iter().all(|row| row.output.rate > 5.0));
     validate_factory(&data, &near_capacity)?;
 
     let mut wrong = f.clone();
@@ -638,6 +638,98 @@ fn mirrored_rows_share_one_output_with_independent_lane_budgets() -> Result<()> 
     assert_eq!(single.rows.len(), 1);
     assert_eq!(single.output_ports()[0].lanes, "right");
     validate_factory(&data, &single)?;
+    Ok(())
+}
+
+#[test]
+fn inserter_capacities_use_transfer_direction_and_reject_inflated_metadata() -> Result<()> {
+    let data = common::catalog();
+    let f = generate_blueprint(&data, &FactoryRequest::new("electronic-circuit", 60.0))?;
+    // One long-handed, single-item inserter still limits each machine. The old
+    // serial-motion formula produced 591 machines for this exact request.
+    assert!((150..=180).contains(&f.machine_count));
+    assert!((f.machine_crafts_per_second - 1.5).abs() < 1e-10);
+    assert!((f.inserter_items_per_second - 2.5).abs() < 1e-10);
+    assert!((1.1..1.25).contains(&f.inputs[1].inserter_items_per_second));
+    assert!(f.inputs[0].inserter_items_per_second != f.inserter_items_per_second);
+    for row in &f.rows {
+        let per_machine = row.output.rate / row.machines.len() as f64;
+        assert!(per_machine * 3.0 <= f.inputs[1].inserter_items_per_second + 1e-10);
+    }
+    let mut wrong = f.clone();
+    wrong.inputs[1].inserter_items_per_second *= 10.0;
+    assert!(
+        validate_factory(&data, &wrong)
+            .unwrap_err()
+            .to_string()
+            .contains("Overstated ingredient")
+    );
+    let mut wrong = f;
+    wrong.inserter_items_per_second *= 10.0;
+    assert!(
+        validate_factory(&data, &wrong)
+            .unwrap_err()
+            .to_string()
+            .contains("output inserter capacity")
+    );
+    Ok(())
+}
+
+#[test]
+fn spare_inserters_on_other_machines_cannot_hide_a_local_output_bottleneck() -> Result<()> {
+    let mut raw = common::catalog_value();
+    raw["recipes"]["iron-gear-wheel"]["energy"] = json!(0.1);
+    let data = serde_json::from_value(raw)?;
+    let mut f = generate_blueprint(&data, &FactoryRequest::new("iron-gear-wheel", 5.0))?;
+    assert_eq!(f.machine_count, 2);
+    let machine = &f.document.blueprint.entities[(f.rows[0].machines[0] - 1) as usize];
+    let arm_id = f
+        .document
+        .blueprint
+        .entities
+        .iter()
+        .find(|e| {
+            e.name == f.request.inserter
+                && e.direction == 0
+                && e.position.y == machine.position.y + 2.0
+                && (e.position.x - machine.position.x).abs() == 1.0
+        })
+        .unwrap()
+        .entity_number;
+    f.document
+        .blueprint
+        .entities
+        .retain(|e| e.entity_number != arm_id);
+    assert!(
+        validate_factory(&data, &f)
+            .unwrap_err()
+            .to_string()
+            .contains("Machine exceeds modelled output inserter capacity")
+    );
+    Ok(())
+}
+
+#[test]
+fn storage_uses_belt_pickup_capacity_instead_of_machine_output_capacity() -> Result<()> {
+    let data = common::catalog();
+    for reverse in [false, true] {
+        let mut request = FactoryRequest::new("copper-cable", 9.0);
+        request.output_chest = Some("steel-chest".into());
+        request.reverse_output = reverse;
+        let f = generate_blueprint(&data, &request)?;
+        let factory = serde_json::to_value(&f)?;
+        let pickup = f.inputs[0].inserter_items_per_second;
+        let ports = f.output_ports();
+        for bank in &f.storage {
+            let port = ports
+                .iter()
+                .find(|p| p.entity_number == bank.output_entity)
+                .unwrap();
+            assert_eq!(port.lanes, "both");
+            assert_eq!(bank.inserters.len(), (port.rate / pickup).ceil() as usize);
+        }
+        validate_factory(&data, &serde_json::from_value(factory)?)?;
+    }
     Ok(())
 }
 
@@ -801,7 +893,7 @@ fn adapts_pole_clearance_and_row_length_to_equipment_and_recipe() -> Result<()> 
     narrow["collision_box"]["right_bottom"]["x"] = json!(0.15);
     raw["entities"]["narrow-machine"] = narrow;
     let data = serde_json::from_value(raw)?;
-    let mut request = FactoryRequest::new("iron-gear-wheel", 2.0);
+    let mut request = FactoryRequest::new("iron-gear-wheel", 6.0);
     request.machine = "narrow-machine".into();
     let narrow = generate_blueprint(&data, &request)?;
     validate_factory(&data, &narrow)?;

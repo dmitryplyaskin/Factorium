@@ -78,6 +78,18 @@ script.on_init(function()
     local p = prototypes.entity[name]
     if not p or p.tile_width ~= size[1] or p.tile_height ~= size[2] then fail("Equipment footprint differs from the catalog: " .. name) end
   end
+  for name, expected in pairs(cfg.inserter_profiles) do
+    local p = prototypes.entity[name]
+    if math.abs(p.get_inserter_rotation_speed("normal") - expected.rotation) > 1e-8
+      or math.abs(p.get_inserter_extension_speed("normal") - expected.extension) > 1e-8 then
+      fail("Inserter speeds differ from the catalog: " .. name)
+    end
+    local pickup, drop = p.inserter_pickup_position, p.inserter_drop_position
+    if math.abs(pickup[1] - expected.pickup[1]) > 1e-8 or math.abs(pickup[2] - expected.pickup[2]) > 1e-8
+      or math.abs(drop[1] - expected.drop[1]) > 1e-8 or math.abs(drop[2] - expected.drop[2]) > 1e-8 then
+      fail("Inserter reach differs from the catalog: " .. name)
+    end
+  end
   local machine = real[f.rows[1].machines[1]]
   local recipe = prototypes.recipe[f.recipe]
   if #recipe.ingredients ~= #ingredients or #recipe.products ~= 1 or recipe.products[1].name ~= f.request.product then

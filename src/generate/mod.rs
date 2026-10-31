@@ -5,6 +5,7 @@ mod control;
 mod infrastructure;
 mod infrastructure_check;
 mod input_plan;
+mod inserter;
 mod layout;
 mod output_bus;
 mod output_check;
@@ -163,6 +164,7 @@ pub struct InputRequirement {
     pub per_second: f64,
     pub supplied_per_second: f64,
     pub inserter: String,
+    /// Modelled belt-to-machine capacity per inserter for this ingredient's lanes.
     pub inserter_items_per_second: f64,
 }
 
@@ -196,6 +198,8 @@ pub struct GeneratedFactory {
     pub supplied_input_per_second: f64,
     pub planned_output_per_second: f64,
     pub machine_crafts_per_second: f64,
+    /// Modelled machine-to-belt capacity per output inserter (one-item hand).
+    /// Storage uses a separate belt-to-chest calculation.
     pub inserter_items_per_second: f64,
     pub belt_items_per_second: f64,
     pub power: PowerPlan,
@@ -787,40 +791,18 @@ pub fn generate_blueprint_controlled(
     let craft_speed = stat(machine, "crafting_speed")? * (1.0 + speed_effect).max(0.2);
     let crafts = craft_speed / recipe.energy;
     let belt_speed = property_number(belt, "belt_speed")?;
-    let rotation = stat(arm, "inserter_rotation_speed")?;
-    let extension = stat(arm, "inserter_extension_speed")?;
     ensure!(
-        crafts > 0.0 && belt_speed > 0.0 && rotation > 0.0 && extension > 0.0,
+        crafts.is_finite() && crafts > 0.0 && belt_speed > 0.0,
         "Equipment speeds must be positive"
     );
-    // Deliberately conservative sequential motion plus belt-pickup latency. Stack
-    // size is explicitly fixed to one, so research cannot silently change this plan.
-    let cycle = 2.0 * (0.5 / rotation).ceil()
-        + 2.0 * (1.0 / extension).ceil()
-        + 2.0 * (1.0 / (4.0 * belt_speed)).ceil()
-        + 4.0;
-    let arm_rate = 0.8 * 60.0 / cycle;
+    let arm_rates = inserter::rates(arm, belt)?;
+    let secondary_rates = secondary.map(|e| inserter::rates(e, belt)).transpose()?;
     let arm_columns = if machine.tile_width == 1 {
         vec![0]
     } else {
         vec![0, machine.tile_width - 1]
     };
-    let transfer = arm_rate * arm_columns.len() as f64;
-    let secondary_rate = if let Some(e) = secondary {
-        let r = stat(e, "inserter_rotation_speed")?;
-        let x = stat(e, "inserter_extension_speed")?;
-        ensure!(
-            r > 0.0 && x > 0.0,
-            "Secondary inserter speeds must be positive"
-        );
-        0.8 * 60.0
-            / (2.0 * (0.5 / r).ceil()
-                + 2.0 * (2.0 / x).ceil()
-                + 2.0 * (1.0 / (4.0 * belt_speed)).ceil()
-                + 4.0)
-    } else {
-        0.0
-    };
+    let transfer = arm_rates.output * arm_columns.len() as f64;
     let belt_rate = belt_speed * 480.0;
     let planned = request.rate * 1.05;
     ensure!(planned.is_finite(), "Output rate is too large");
@@ -835,13 +817,26 @@ pub fn generate_blueprint_controlled(
             .collect();
         let amount: f64 = indices.iter().map(|&i| flow.ingredients[i].1).sum();
         let input_transfer = if input_plan.reaches[indices[0]] == 2 {
-            secondary_rate
+            secondary_rates.as_ref().unwrap().input_both
         } else if flow.ingredients.len() == 1 || indices.len() == 2 {
-            transfer
+            arm_rates.input_both * arm_columns.len() as f64
         } else {
-            arm_rate
+            arm_rates.input_both
         };
         cell_rate = cell_rate.min(input_transfer * b / amount);
+    }
+    for (i, (_, amount)) in flow.ingredients.iter().enumerate() {
+        let rates = if input_plan.reaches[i] == 2 {
+            secondary_rates.as_ref().unwrap()
+        } else {
+            &arm_rates
+        };
+        let arms = if flow.ingredients.len() == 1 || input_plan.lanes[i] != "both" {
+            arm_columns.len()
+        } else {
+            1
+        };
+        cell_rate = cell_rate.min(rates.input(input_plan.lanes[i]) * arms as f64 * b / amount);
     }
     let row_cap = flow.ingredients.iter().enumerate().fold(
         belt_rate * 0.5 * 0.85,
@@ -926,7 +921,6 @@ pub fn generate_blueprint_controlled(
             &mut doc,
             infrastructure::Rates {
                 belt: belt_rate,
-                arm: arm_rate,
                 machine_output: crafts * b,
             },
             control,
@@ -1051,9 +1045,9 @@ pub fn generate_blueprint_controlled(
                         request.inserter.clone()
                     },
                     inserter_items_per_second: if input_plan.reaches[i] == 2 {
-                        secondary_rate
+                        secondary_rates.as_ref().unwrap().input(input_plan.lanes[i])
                     } else {
-                        arm_rate
+                        arm_rates.input(input_plan.lanes[i])
                     },
                 })
                 .collect(),
@@ -1062,7 +1056,7 @@ pub fn generate_blueprint_controlled(
             supplied_input_per_second: planned * a / b,
             planned_output_per_second: planned,
             machine_crafts_per_second: crafts,
-            inserter_items_per_second: arm_rate,
+            inserter_items_per_second: arm_rates.output,
             belt_items_per_second: belt_rate,
             power,
             rows,

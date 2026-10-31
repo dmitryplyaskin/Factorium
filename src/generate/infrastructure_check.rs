@@ -337,7 +337,13 @@ pub(super) fn validate(
             "Storage needs chests and inserters"
         );
         ensure!(
-            bank.inserters.len() as f64 * f.inserter_items_per_second + 1e-8
+            bank.inserters.len() as f64
+                * super::inserter::rates(
+                    entity(data, &f.request.inserter)?,
+                    entity(data, &f.request.belt)?,
+                )?
+                .input(&port.lanes)
+                + 1e-8
                 >= super::infrastructure::storage_rate(
                     &f.request,
                     &f.rows,

@@ -20,6 +20,18 @@ pub(super) fn validate(
         .context("Unknown factory recipe")?;
     let flow = supported_recipe(data, recipe, entity(data, &f.request.machine)?)?;
     let requirements = f.input_requirements();
+    let belt = entity(data, &f.request.belt)?;
+    let capacities = requirements
+        .iter()
+        .map(|r| super::inserter::rates(entity(data, &r.inserter)?, belt))
+        .collect::<Result<Vec<_>>>()?;
+    let output_capacity = super::inserter::rates(entity(data, &f.request.inserter)?, belt)?.output;
+    ensure!(
+        f.inserter_items_per_second.is_finite()
+            && f.inserter_items_per_second > 0.0
+            && f.inserter_items_per_second <= output_capacity + 1e-6,
+        "Invalid or overstated output inserter capacity"
+    );
     ensure!(
         requirements.len() == flow.ingredients.len(),
         "Ingredient requirements count mismatch"
@@ -206,6 +218,13 @@ pub(super) fn validate(
         );
         let mut input_lines = Vec::new();
         for (i, port) in ports.iter().enumerate() {
+            let capacity = capacities[i].input(&port.lanes);
+            // Older projects can retain a lower estimate. Capacity checks below
+            // reconstruct current speeds from the catalog, never trust metadata.
+            ensure!(
+                f.inputs.is_empty() || requirements[i].inserter_items_per_second <= capacity + 1e-6,
+                "Overstated ingredient inserter capacity"
+            );
             ensure!(
                 port.rate.is_finite() && port.rate > 0.0 && port.item == requirements[i].item,
                 "Wrong or missing ingredient at input port"
@@ -433,12 +452,21 @@ pub(super) fn validate(
                 port.rate <= belt_speed * if port.lanes == "both" { 1.0 } else { 0.5 } + 1e-8,
                 "Ingredient input exceeds belt capacity"
             );
+            let capacity = capacities[i].input(&port.lanes);
             ensure!(
-                port.rate
-                    <= inputs[i].values().sum::<usize>() as f64
-                        * requirements[i].inserter_items_per_second
-                        + 1e-6,
+                port.rate <= inputs[i].values().sum::<usize>() as f64 * capacity + 1e-6,
                 "Row exceeds modelled inserter capacity for ingredient {}",
+                port.item
+            );
+            let per_machine = port.rate / row.machines.len() as f64;
+            ensure!(
+                row.machines
+                    .iter()
+                    .all(
+                        |id| inputs[i].get(id).copied().unwrap_or(0) as f64 * capacity + 1e-6
+                            >= per_machine
+                    ),
+                "Machine exceeds modelled inserter capacity for ingredient {}",
                 port.item
             );
         }
@@ -450,16 +478,33 @@ pub(super) fn validate(
                 .sum();
             ensure!(
                 combined
-                    <= inputs[i].values().sum::<usize>() as f64
-                        * requirements[i].inserter_items_per_second
-                        + 1e-6,
+                    <= inputs[i].values().sum::<usize>() as f64 * capacities[i].input_both + 1e-6,
                 "Shared input exceeds combined inserter capacity"
+            );
+            let per_machine = combined / row.machines.len() as f64;
+            ensure!(
+                row.machines
+                    .iter()
+                    .all(|id| inputs[i].get(id).copied().unwrap_or(0) as f64
+                        * capacities[i].input_both
+                        + 1e-6
+                        >= per_machine),
+                "Machine exceeds combined shared-input inserter capacity"
             );
         }
         ensure!(
-            row.output.rate
-                <= outputs.values().sum::<usize>() as f64 * f.inserter_items_per_second + 1e-6,
+            row.output.rate <= outputs.values().sum::<usize>() as f64 * output_capacity + 1e-6,
             "Row exceeds modelled output inserter capacity"
+        );
+        let per_machine = row.output.rate / row.machines.len() as f64;
+        ensure!(
+            row.machines
+                .iter()
+                .all(
+                    |id| outputs.get(id).copied().unwrap_or(0) as f64 * output_capacity + 1e-6
+                        >= per_machine
+                ),
+            "Machine exceeds modelled output inserter capacity"
         );
         output_rate += row.output.rate;
     }

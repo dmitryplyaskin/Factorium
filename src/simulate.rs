@@ -124,7 +124,28 @@ pub fn verify_in_game(
     } else {
         Vec::new()
     };
-    let payload=serde_json::json!({"factory":factory,"inputs":factory.input_requirements(),"external_inputs":factory.external_inputs(),"observed_inserters":observations,"blueprint_string":factory.document.encode()?,"options":options}).to_string();
+    let inserter_profiles = factory
+        .entity_sizes
+        .keys()
+        .filter_map(|name| {
+            data.entities
+                .get(name)
+                .filter(|e| e.prototype.prototype_type == "inserter")
+                .map(|e| (name.clone(), e))
+        })
+        .map(|(name, e)| {
+            Ok((
+                name,
+                serde_json::json!({
+                    "rotation":crate::generate::stat(e, "inserter_rotation_speed")?,
+                    "extension":crate::generate::stat(e, "inserter_extension_speed")?,
+                    "pickup":e.prototype.properties.get("inserter_pickup_position"),
+                    "drop":e.prototype.properties.get("inserter_drop_position"),
+                }),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let payload=serde_json::json!({"factory":factory,"inputs":factory.input_requirements(),"external_inputs":factory.external_inputs(),"observed_inserters":observations,"inserter_profiles":inserter_profiles,"blueprint_string":factory.document.encode()?,"options":options}).to_string();
     let mut equals = String::from("=");
     while payload.contains(&format!("]{equals}]")) {
         equals.push('=');

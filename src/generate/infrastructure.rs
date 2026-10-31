@@ -48,7 +48,6 @@ pub(super) fn matching<'a>(
 #[derive(Clone, Copy)]
 pub(super) struct Rates {
     pub belt: f64,
-    pub arm: f64,
     pub machine_output: f64,
 }
 
@@ -373,9 +372,14 @@ fn place_storage(
         .unwrap()
         + 3;
     let mut storage = Vec::new();
+    let arm_rates = super::inserter::rates(
+        entity(data, &request.inserter)?,
+        entity(data, &request.belt)?,
+    )?;
     for port in outputs(rows) {
-        let n = (storage_rate(request, rows, &port, rates.belt, rates.machine_output) / rates.arm)
-            .ceil() as usize;
+        let n = (storage_rate(request, rows, &port, rates.belt, rates.machine_output)
+            / arm_rates.input(&port.lanes))
+        .ceil() as usize;
         ensure!(n <= 4096, "Output storage exceeds inserter budget");
         let y = port.position.y;
         let mut belts = Vec::new();
